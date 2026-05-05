@@ -2,11 +2,39 @@ import json
 import os
 import uuid
 from datetime import datetime
+
 from flask import Flask, jsonify, request, render_template_string
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
 app = Flask(__name__)
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-MEMORIES_FILE = os.path.join(DATA_DIR, "memories.json")
-os.makedirs(DATA_DIR, exist_ok=True)
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return conn
+
+def init_db():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS memories (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            content TEXT NOT NULL,
+            tags TEXT DEFAULT '[]',
+            metadata TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+init_db()
+
 HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -24,7 +52,7 @@ HTML = """<!DOCTYPE html>
     }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
     header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; justify-content: space-between; height: 64px; position: sticky; top: 0; z-index: 10; }
-    .logo { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+    .logo { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 700; }
     .logo-icon { width: 32px; height: 32px; background: var(--accent); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
     .count-badge { background: var(--accent-dim); color: var(--accent); font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 20px; border: 1px solid var(--accent); }
     .main { max-width: 800px; margin: 0 auto; padding: 32px 24px 80px; }
@@ -58,7 +86,6 @@ HTML = """<!DOCTYPE html>
     .card-content { font-size: 14px; color: var(--text-muted); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
     .card-footer { margin-top: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .tag { font-size: 11px; font-weight: 600; background: var(--accent-dim); color: var(--accent); padding: 2px 8px; border-radius: 20px; border: 1px solid var(--accent); cursor: pointer; }
-    .tag:hover { background: rgba(108,99,255,0.3); }
     .card-meta { font-size: 11px; color: var(--text-muted); margin-left: auto; }
     .edit-form { display: none; flex-direction: column; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
     .edit-form.open { display: flex; }
@@ -66,12 +93,10 @@ HTML = """<!DOCTYPE html>
     .edit-form textarea { min-height: 80px; resize: vertical; }
     .empty-state { text-align: center; padding: 64px 24px; color: var(--text-muted); }
     .empty-state .icon { font-size: 48px; margin-bottom: 16px; }
-    .empty-state p { font-size: 15px; }
     .toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 12px 18px; border-radius: var(--radius); font-size: 13px; font-weight: 500; box-shadow: var(--shadow); opacity: 0; transform: translateY(8px); transition: opacity 0.2s, transform 0.2s; pointer-events: none; z-index: 100; }
     .toast.show { opacity: 1; transform: translateY(0); }
     .toast.success { border-color: var(--green); color: var(--green); }
     .toast.error { border-color: var(--red); color: var(--red); }
-    @media (max-width: 540px) { header { padding: 0 16px; } .main { padding: 20px 16px 80px; } }
   </style>
 </head>
 <body>
@@ -125,7 +150,7 @@ HTML = """<!DOCTYPE html>
     badge.textContent = all.length === 1 ? '1 memory' : `${all.length} memories`;
     label.textContent = list.length !== all.length ? `Showing ${list.length} of ${all.length}` : (all.length ? 'All memories' : '');
     if (!list.length) {
-      el.innerHTML = `<div class="empty-state"><div class="icon">${!all.length ? '🧠' : '🔍'}</div><p>${!all.length ? 'No memories yet. Create your first one!' : 'No memories match your search.'}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><div class="icon">${!all.length ? '🧠' : '🔍'}</div><p>${!all.length ? 'No memories yet.' : 'No memories match your search.'}</p></div>`;
       return;
     }
     el.innerHTML = list.map(m => `
@@ -196,53 +221,54 @@ HTML = """<!DOCTYPE html>
     if (d<60) return 'just now';
     if (d<3600) return `${Math.floor(d/60)}m ago`;
     if (d<86400) return `${Math.floor(d/3600)}h ago`;
-    if (d<604800) return `${Math.floor(d/86400)}d ago`;
     return new Date(iso).toLocaleDateString();
   }
-  function esc(s) {
-    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-  }
+  function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
   let tt;
   function toast(msg, type='') {
     const el = document.getElementById('toast');
     el.textContent=msg; el.className=`toast show ${type}`;
     clearTimeout(tt); tt=setTimeout(()=>el.classList.remove('show'),2500);
   }
-  document.getElementById('newContent').addEventListener('keydown', e => {
-    if (e.key==='Enter' && (e.metaKey||e.ctrlKey)) createMemory();
-  });
   load();
 </script>
 </body>
 </html>"""
-def _load():
-    if not os.path.exists(MEMORIES_FILE):
-        return {}
-    with open(MEMORIES_FILE, "r") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
-def _save(memories):
-    with open(MEMORIES_FILE, "w") as f:
-        json.dump(memories, f, indent=2)
+
 @app.route("/")
 def index():
     return render_template_string(HTML)
+
 @app.route("/memories", methods=["GET"])
 def list_memories():
-    memories = _load()
+    conn = get_db()
+    cur = conn.cursor()
     tag = request.args.get("tag")
     search = request.args.get("search", "").lower()
-    items = list(memories.values())
-    if tag:
-        items = [m for m in items if tag in m.get("tags", [])]
+    query = "SELECT * FROM memories"
+    conditions = []
+    params = []
     if search:
-        items = [m for m in items
-                 if search in m.get("content", "").lower()
-                 or search in (m.get("title") or "").lower()]
-    items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
+        conditions.append("(LOWER(content) LIKE %s OR LOWER(title) LIKE %s)")
+        params += [f"%{search}%", f"%{search}%"]
+    if tag:
+        conditions.append("tags LIKE %s")
+        params.append(f"%{tag}%")
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY created_at DESC"
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    items = []
+    for row in rows:
+        row = dict(row)
+        row["tags"] = json.loads(row["tags"]) if row["tags"] else []
+        row["metadata"] = json.loads(row["metadata"]) if row["metadata"] else {}
+        items.append(row)
     return jsonify({"count": len(items), "memories": items})
+
 @app.route("/memories", methods=["POST"])
 def create_memory():
     data = request.get_json(silent=True)
@@ -253,64 +279,94 @@ def create_memory():
         return jsonify({"error": "'content' is required"}), 400
     memory_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat() + "Z"
-    memory = {
-        "id": memory_id,
-        "title": (data.get("title") or "").strip() or None,
-        "content": content,
-        "tags": data.get("tags", []),
-        "metadata": data.get("metadata", {}),
-        "created_at": now,
-        "updated_at": now,
-    }
-    memories = _load()
-    memories[memory_id] = memory
-    _save(memories)
-    return jsonify(memory), 201
+    tags = json.dumps(data.get("tags", []))
+    metadata = json.dumps(data.get("metadata", {}))
+    title = (data.get("title") or "").strip() or None
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO memories (id, title, content, tags, metadata, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (memory_id, title, content, tags, metadata, now, now)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"id": memory_id, "title": title, "content": content, "tags": data.get("tags", []), "metadata": data.get("metadata", {}), "created_at": now, "updated_at": now}), 201
+
 @app.route("/memories/<memory_id>", methods=["GET"])
 def get_memory(memory_id):
-    memories = _load()
-    memory = memories.get(memory_id)
-    if not memory:
-        return jsonify({"error": f"Memory '{memory_id}' not found"}), 404
-    return jsonify(memory)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM memories WHERE id = %s", (memory_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return jsonify({"error": "Memory not found"}), 404
+    row = dict(row)
+    row["tags"] = json.loads(row["tags"]) if row["tags"] else []
+    row["metadata"] = json.loads(row["metadata"]) if row["metadata"] else {}
+    return jsonify(row)
+
 @app.route("/memories/<memory_id>", methods=["PUT"])
 def update_memory(memory_id):
-    memories = _load()
-    memory = memories.get(memory_id)
-    if not memory:
-        return jsonify({"error": f"Memory '{memory_id}' not found"}), 404
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM memories WHERE id = %s", (memory_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return jsonify({"error": "Memory not found"}), 404
     data = request.get_json(silent=True)
     if not data:
+        cur.close()
+        conn.close()
         return jsonify({"error": "Request body must be valid JSON"}), 400
+    row = dict(row)
     if "content" in data:
-        content = (data["content"] or "").strip()
-        if not content:
-            return jsonify({"error": "'content' cannot be empty"}), 400
-        memory["content"] = content
+        row["content"] = (data["content"] or "").strip()
     if "title" in data:
-        memory["title"] = (data["title"] or "").strip() or None
+        row["title"] = (data["title"] or "").strip() or None
     if "tags" in data:
-        memory["tags"] = data["tags"]
-    if "metadata" in data:
-        memory["metadata"] = data["metadata"]
-    memory["updated_at"] = datetime.utcnow().isoformat() + "Z"
-    memories[memory_id] = memory
-    _save(memories)
-    return jsonify(memory)
+        row["tags_list"] = data["tags"]
+    else:
+        row["tags_list"] = json.loads(row["tags"]) if row["tags"] else []
+    now = datetime.utcnow().isoformat() + "Z"
+    cur.execute(
+        "UPDATE memories SET title=%s, content=%s, tags=%s, updated_at=%s WHERE id=%s",
+        (row["title"], row["content"], json.dumps(row["tags_list"]), now, memory_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"id": memory_id, "title": row["title"], "content": row["content"], "tags": row["tags_list"], "updated_at": now})
+
 @app.route("/memories/<memory_id>", methods=["DELETE"])
 def delete_memory(memory_id):
-    memories = _load()
-    if memory_id not in memories:
-        return jsonify({"error": f"Memory '{memory_id}' not found"}), 404
-    deleted = memories.pop(memory_id)
-    _save(memories)
-    return jsonify({"message": "Memory deleted", "deleted": deleted})
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM memories WHERE id = %s", (memory_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return jsonify({"error": "Memory not found"}), 404
+    cur.execute("DELETE FROM memories WHERE id = %s", (memory_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Memory deleted"})
+
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({"error": "Route not found"}), 404
+
 @app.errorhandler(405)
 def method_not_allowed(e):
     return jsonify({"error": "Method not allowed"}), 405
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
