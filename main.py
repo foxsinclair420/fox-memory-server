@@ -245,6 +245,7 @@ def list_memories():
     cur = conn.cursor()
     tag = request.args.get("tag")
     search = request.args.get("search", "").lower()
+    limit = request.args.get("limit", None)
     query = "SELECT * FROM memories"
     conditions = []
     params = []
@@ -257,6 +258,9 @@ def list_memories():
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY created_at DESC"
+    if limit:
+        query += " LIMIT %s"
+        params.append(int(limit))
     cur.execute(query, params)
     rows = cur.fetchall()
     cur.close()
