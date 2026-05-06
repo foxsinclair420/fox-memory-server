@@ -29,6 +29,15 @@ def init_db():
             updated_at TEXT NOT NULL
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            owner_uuid TEXT NOT NULL,
+            speaker_name TEXT,
+            raw_log TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -270,7 +279,6 @@ def list_memories():
         row = dict(row)
         row["tags"] = json.loads(row["tags"]) if row["tags"] else []
         row["metadata"] = json.loads(row["metadata"]) if row["metadata"] else {}
-        # Truncate and clean content for LSL compatibility
         if row.get("content"):
             c = row["content"].encode("ascii", "ignore").decode("ascii")
             if len(c) > 400:
@@ -367,6 +375,38 @@ def delete_memory(memory_id):
     cur.close()
     conn.close()
     return jsonify({"message": "Memory deleted"})
+
+@app.route("/conversations", methods=["POST"])
+def save_conversation():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+    convo_id = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat() + "Z"
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO conversations (id, owner_uuid, speaker_name, raw_log, created_at) VALUES (%s, %s, %s, %s, %s)",
+        (convo_id, data.get("owner_uuid", ""), data.get("speaker_name", ""), data.get("raw_log", ""), now)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"id": convo_id}), 201
+
+@app.route("/conversations", methods=["GET"])
+def list_conversations():
+    conn = get_db()
+    cur = conn.cursor()
+    owner = request.args.get("owner_uuid")
+    if owner:
+        cur.execute("SELECT * FROM conversations WHERE owner_uuid = %s ORDER BY created_at DESC", (owner,))
+    else:
+        cur.execute("SELECT * FROM conversations ORDER BY created_at DESC")
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return jsonify({"count": len(rows), "conversations": rows})
 
 @app.errorhandler(404)
 def not_found(e):
