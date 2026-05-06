@@ -249,10 +249,10 @@ def list_memories():
     conditions = []
     params = []
     if search:
-        conditions.append("(LOWER(content) LIKE %s OR LOWER(title) LIKE %s)")
+        conditions.append("(LOWER(content) ILIKE %s OR LOWER(title) ILIKE %s)")
         params += [f"%{search}%", f"%{search}%"]
     if tag:
-        conditions.append("tags LIKE %s")
+        conditions.append("tags ILIKE %s")
         params.append(f"%{tag}%")
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
@@ -369,4 +369,3 @@ def method_not_allowed(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
