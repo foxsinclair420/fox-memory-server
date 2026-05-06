@@ -3,6 +3,7 @@ import os
 import uuid
 from datetime import datetime
 
+import requests as http_requests
 from flask import Flask, jsonify, request, render_template_string
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -10,6 +11,8 @@ from psycopg2.extras import RealDictCursor
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+OLLAMA_URL = os.environ.get("OLLAMA_URL")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -407,6 +410,63 @@ def list_conversations():
     cur.close()
     conn.close()
     return jsonify({"count": len(rows), "conversations": rows})
+
+@app.route("/chat", methods=["POST"])
+def chat_proxy():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    system_prompt = data.get("system", "")
+    user_message = data.get("message", "")
+    max_tokens = data.get("max_tokens", 200)
+
+    # Try Ollama on Shadow PC first
+    if OLLAMA_URL:
+        try:
+            ol_resp = http_requests.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={
+                    "model": "hf.co/DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF:Q4_K_S",
+                    "stream": False,
+                    "options": {"num_predict": max_tokens},
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message}
+                    ]
+                },
+                timeout=30
+            )
+            if ol_resp.status_code == 200:
+                reply = ol_resp.json()["message"]["content"].strip()
+                if "<think>" in reply:
+                    reply = reply.split("</think>")[-1].strip()
+                return jsonify({"reply": reply, "source": "ollama"})
+        except Exception:
+            pass  # Shadow PC offline, fall through to GPT
+
+    # Fallback: OpenAI GPT-4o
+    if not OPENAI_API_KEY:
+        return jsonify({"error": "No AI backend available"}), 503
+
+    try:
+        gpt_resp = http_requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={
+                "model": "gpt-4o",
+                "max_completion_tokens": max_tokens,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ]
+            },
+            timeout=20
+        )
+        reply = gpt_resp.json()["choices"][0]["message"]["content"].strip()
+        return jsonify({"reply": reply, "source": "gpt"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(e):
