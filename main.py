@@ -266,6 +266,9 @@ def list_memories():
         row = dict(row)
         row["tags"] = json.loads(row["tags"]) if row["tags"] else []
         row["metadata"] = json.loads(row["metadata"]) if row["metadata"] else {}
+        # Truncate long content to keep response size manageable for LSL
+        if row.get("content") and len(row["content"]) > 500:
+            row["content"] = row["content"][:500] + "..."
         items.append(row)
     return jsonify({"count": len(items), "memories": items})
 
