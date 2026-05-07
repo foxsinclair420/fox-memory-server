@@ -46,6 +46,13 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS profiles (
+            owner_uuid TEXT PRIMARY KEY,
+            profile TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -400,6 +407,21 @@ def save_conversation():
     conn.commit()
     cur.close()
     conn.close()
+
+    # Trigger profile update in background
+    try:
+        http_requests.post(
+            "http://localhost:" + str(int(os.environ.get("PORT", 3000))) + "/profile/update",
+            json={
+                "owner_uuid": data.get("owner_uuid", ""),
+                "speaker_name": data.get("speaker_name", ""),
+                "conversation": data.get("raw_log", "")
+            },
+            timeout=25
+        )
+    except Exception:
+        pass
+
     return jsonify({"id": convo_id}), 201
 
 @app.route("/conversations", methods=["GET"])
@@ -494,6 +516,80 @@ def chat_proxy():
         reply = clean_reply(gpt_resp.json()["choices"][0]["message"]["content"])
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
         return jsonify({"reply": reply, "source": "gpt"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/profile/<owner_uuid>", methods=["GET"])
+def get_profile(owner_uuid):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM profiles WHERE owner_uuid = %s", (owner_uuid,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return jsonify({"profile": ""}), 200
+    return jsonify({"profile": dict(row)["profile"]}), 200
+
+@app.route("/profile/update", methods=["POST"])
+def update_profile():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+    owner_uuid = data.get("owner_uuid", "")
+    speaker_name = data.get("speaker_name", "")
+    new_convo = data.get("conversation", "")
+    if not owner_uuid or not new_convo:
+        return jsonify({"error": "Missing fields"}), 400
+
+    # Fetch existing profile
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT profile FROM profiles WHERE owner_uuid = %s", (owner_uuid,))
+    row = cur.fetchone()
+    existing = dict(row)["profile"] if row else ""
+    cur.close()
+    conn.close()
+
+    if not OPENAI_API_KEY:
+        return jsonify({"error": "No AI backend"}), 503
+
+    # Ask GPT to update the profile
+    existing_section = f"Current profile:\n{existing}\n\n" if existing else ""
+    prompt = (
+        f"{existing_section}"
+        f"New conversation with {speaker_name}:\n{new_convo}\n\n"
+        f"Update the personality profile for this person based on everything you know about them. "
+        f"Write it as a short natural paragraph (3-5 sentences) describing who they are, their personality, habits, interests, humor, and communication style. "
+        f"Do not list facts. Write it like notes a close friend would keep. "
+        f"Do not mention that this is a profile or reference Fox. Just describe the person."
+    )
+    try:
+        resp = http_requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={
+                "model": "gpt-4o",
+                "max_completion_tokens": 200,
+                "messages": [
+                    {"role": "system", "content": "You maintain personality profiles of people based on their conversations."},
+                    {"role": "user", "content": prompt}
+                ]
+            },
+            timeout=20
+        )
+        profile = clean_reply(resp.json()["choices"][0]["message"]["content"].strip())
+        now = datetime.utcnow().isoformat() + "Z"
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO profiles (owner_uuid, profile, updated_at) VALUES (%s, %s, %s) ON CONFLICT (owner_uuid) DO UPDATE SET profile = %s, updated_at = %s",
+            (owner_uuid, profile, now, profile, now)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({"profile": profile}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
