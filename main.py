@@ -411,6 +411,19 @@ def list_conversations():
     conn.close()
     return jsonify({"count": len(rows), "conversations": rows})
 
+def clean_reply(text):
+    replacements = {
+        '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"',
+        '\u2013': '-', '\u2014': '-', '\u2026': '...', '\u2022': '-',
+        '\u00e9': 'e', '\u00e8': 'e', '\u00ea': 'e', '\u00eb': 'e',
+        '\u00e0': 'a', '\u00e2': 'a', '\u00e4': 'a', '\u00f4': 'o',
+        '\u00fb': 'u', '\u00fc': 'u', '\u00e7': 'c', '\u00ee': 'i',
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    text = text.encode('ascii', 'ignore').decode('ascii')
+    return text.strip()
+
 @app.route("/chat", methods=["POST"])
 def chat_proxy():
     data = request.get_json(silent=True)
@@ -438,7 +451,7 @@ def chat_proxy():
                 timeout=30
             )
             if ol_resp.status_code == 200:
-                reply = ol_resp.json()["message"]["content"].strip()
+                reply = clean_reply(ol_resp.json()["message"]["content"])
                 if "<think>" in reply:
                     reply = reply.split("</think>")[-1].strip()
                 return jsonify({"reply": reply, "source": "ollama"})
@@ -463,7 +476,7 @@ def chat_proxy():
             },
             timeout=20
         )
-        reply = gpt_resp.json()["choices"][0]["message"]["content"].strip()
+        reply = clean_reply(gpt_resp.json()["choices"][0]["message"]["content"])
         return jsonify({"reply": reply, "source": "gpt"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -479,4 +492,3 @@ def method_not_allowed(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
