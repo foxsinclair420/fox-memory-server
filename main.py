@@ -391,6 +391,22 @@ def delete_memory(memory_id):
     conn.close()
     return jsonify({"message": "Memory deleted"})
 
+@app.route("/memories/recent/<owner_uuid>", methods=["GET"])
+def recent_memory(owner_uuid):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM memories WHERE tags ILIKE %s ORDER BY created_at DESC LIMIT 1",
+        (f"%{owner_uuid}%",)
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return jsonify({"memory": "", "created_at": ""}), 200
+    row = dict(row)
+    return jsonify({"memory": row["content"], "created_at": row["created_at"]}), 200
+
 @app.route("/conversations", methods=["POST"])
 def save_conversation():
     data = request.get_json(silent=True)
