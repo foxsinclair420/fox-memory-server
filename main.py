@@ -410,12 +410,15 @@ def save_conversation():
 
     # Trigger profile update in background
     try:
+        is_whitelisted = data.get("is_whitelisted", False)
+        depth = "full" if is_whitelisted else "light"
         http_requests.post(
             "http://localhost:" + str(int(os.environ.get("PORT", 3000))) + "/profile/update",
             json={
                 "owner_uuid": data.get("owner_uuid", ""),
                 "speaker_name": data.get("speaker_name", ""),
-                "conversation": data.get("raw_log", "")
+                "conversation": data.get("raw_log", ""),
+                "depth": depth
             },
             timeout=25
         )
@@ -539,6 +542,7 @@ def update_profile():
     owner_uuid = data.get("owner_uuid", "")
     speaker_name = data.get("speaker_name", "")
     new_convo = data.get("conversation", "")
+    depth = data.get("depth", "full")  # "full" or "light"
     if not owner_uuid or not new_convo:
         return jsonify({"error": "Missing fields"}), 400
 
@@ -554,16 +558,24 @@ def update_profile():
     if not OPENAI_API_KEY:
         return jsonify({"error": "No AI backend"}), 503
 
-    # Ask GPT to update the profile
     existing_section = f"Current profile:\n{existing}\n\n" if existing else ""
-    prompt = (
-        f"{existing_section}"
-        f"New conversation with {speaker_name}:\n{new_convo}\n\n"
-        f"Update the personality profile for this person based on everything you know about them. "
-        f"Write it as a short natural paragraph (3-5 sentences) describing who they are, their personality, habits, interests, humor, and communication style. "
-        f"Do not list facts. Write it like notes a close friend would keep. "
-        f"Do not mention that this is a profile or reference Fox. Just describe the person."
-    )
+
+    if depth == "light":
+        prompt = (
+            f"{existing_section}"
+            f"New visit from {speaker_name}:\n{new_convo}\n\n"
+            f"Write a brief 1-2 sentence note about this visitor - who they are, why they visit, and their general vibe. "
+            f"Keep it casual and natural. Do not list facts or mention Fox."
+        )
+    else:
+        prompt = (
+            f"{existing_section}"
+            f"New conversation with {speaker_name}:\n{new_convo}\n\n"
+            f"Update the personality profile for this person based on everything you know about them. "
+            f"Write it as a short natural paragraph (3-5 sentences) describing who they are, their personality, habits, interests, humor, and communication style. "
+            f"Do not list facts. Write it like notes a close friend would keep. "
+            f"Do not mention that this is a profile or reference Fox. Just describe the person."
+        )
     try:
         resp = http_requests.post(
             "https://api.openai.com/v1/chat/completions",
