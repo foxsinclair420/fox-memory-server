@@ -14,6 +14,11 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
+# In-memory conversation history per speaker key
+# Format: { "speaker_uuid": [{"role": "user", "content": "..."}, ...] }
+conversation_history = {}
+MAX_HISTORY = 6  # keep last 6 exchanges (3 user + 3 assistant)
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
@@ -433,6 +438,21 @@ def chat_proxy():
     system_prompt = data.get("system", "")
     user_message = data.get("message", "")
     max_tokens = data.get("max_tokens", 200)
+    speaker_key = data.get("speaker_key", "unknown")
+
+    # Build conversation history for this speaker
+    if speaker_key not in conversation_history:
+        conversation_history[speaker_key] = []
+    
+    # Add user message to history
+    conversation_history[speaker_key].append({"role": "user", "content": user_message})
+    
+    # Keep only last MAX_HISTORY messages
+    if len(conversation_history[speaker_key]) > MAX_HISTORY:
+        conversation_history[speaker_key] = conversation_history[speaker_key][-MAX_HISTORY:]
+    
+    # Build messages array with system prompt + history
+    messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key]
 
     # Try Ollama on Shadow PC first
     if OLLAMA_URL:
@@ -443,10 +463,7 @@ def chat_proxy():
                     "model": "hf.co/DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF:Q4_K_S",
                     "stream": False,
                     "options": {"num_predict": max_tokens},
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message}
-                    ]
+                    "messages": messages
                 },
                 timeout=30
             )
@@ -454,9 +471,10 @@ def chat_proxy():
                 reply = clean_reply(ol_resp.json()["message"]["content"])
                 if "<think>" in reply:
                     reply = reply.split("</think>")[-1].strip()
+                conversation_history[speaker_key].append({"role": "assistant", "content": reply})
                 return jsonify({"reply": reply, "source": "ollama"})
         except Exception:
-            pass  # Shadow PC offline, fall through to GPT
+            pass
 
     # Fallback: OpenAI GPT-4o
     if not OPENAI_API_KEY:
@@ -469,14 +487,12 @@ def chat_proxy():
             json={
                 "model": "gpt-4o",
                 "max_completion_tokens": max_tokens,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ]
+                "messages": messages
             },
             timeout=20
         )
         reply = clean_reply(gpt_resp.json()["choices"][0]["message"]["content"])
+        conversation_history[speaker_key].append({"role": "assistant", "content": reply})
         return jsonify({"reply": reply, "source": "gpt"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
