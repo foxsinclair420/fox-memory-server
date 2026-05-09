@@ -5,10 +5,12 @@ from datetime import datetime
 
 import requests as http_requests
 from flask import Flask, jsonify, request, render_template_string
+from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
+CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
@@ -484,14 +486,14 @@ def chat_proxy():
     # Build conversation history for this speaker
     if speaker_key not in conversation_history:
         conversation_history[speaker_key] = []
-    
+
     # Add user message to history
     conversation_history[speaker_key].append({"role": "user", "content": user_message})
-    
+
     # Keep only last MAX_HISTORY messages
     if len(conversation_history[speaker_key]) > MAX_HISTORY:
         conversation_history[speaker_key] = conversation_history[speaker_key][-MAX_HISTORY:]
-    
+
     # Build messages array with system prompt + history
     messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key]
 
