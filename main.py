@@ -559,6 +559,14 @@ def chat_proxy():
     # Build messages array with system prompt + history
     image_data = data.get("image")  # base64 data URI
 
+    # Append owner status to system prompt if available
+    owner_status = None
+    if hasattr(set_status, "owner_statuses"):
+        owner_status = set_status.owner_statuses.get(speaker_key)
+    if owner_status:
+        system_prompt = system_prompt + f" Owner current status: {owner_status}."
+
+
     if image_data:
         user_content = [
             {"type": "text", "text": user_message or "What do you see?"},
@@ -607,13 +615,40 @@ def chat_proxy():
             },
             timeout=30
         )
-        if gpt_resp.status_code != 200:
-            return jsonify({"error": "GPT error", "details": gpt_resp.json()}), 500
         reply = clean_reply(gpt_resp.json()["choices"][0]["message"]["content"])
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
         return jsonify({"reply": reply, "source": "gpt"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/status", methods=["POST"])
+@require_auth
+def set_status():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+    owner_uuid = data.get("owner_uuid", "")
+    status = data.get("status", "online").strip()
+    if not owner_uuid:
+        return jsonify({"error": "Missing owner_uuid"}), 400
+    now = datetime.utcnow().isoformat() + "Z"
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO profiles (owner_uuid, profile, updated_at) VALUES (%s, %s, %s) ON CONFLICT (owner_uuid) DO UPDATE SET updated_at = %s",
+        (owner_uuid, "", now, now)
+    )
+    # Store status in a simple way by upserting into a metadata column if it exists,
+    # or we use a dedicated approach: store in conversation_history in-memory
+    conn.commit()
+    cur.close()
+    conn.close()
+    # Store in memory for this session
+    if not hasattr(set_status, "owner_statuses"):
+        set_status.owner_statuses = {}
+    set_status.owner_statuses[owner_uuid] = status
+    return jsonify({"status": status}), 200
+
 
 @app.route("/profile/<owner_uuid>", methods=["GET"])
 def get_profile(owner_uuid):
