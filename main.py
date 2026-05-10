@@ -1,76 +1,23 @@
 import json
 import os
 import uuid
-import hmac
-import hashlib
-import time
 from datetime import datetime
 
 import requests as http_requests
 from flask import Flask, jsonify, request, render_template_string
-from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
-CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-APP_PIN = os.environ.get("APP_PIN", "")
-TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 
 # In-memory conversation history per speaker key
+# Format: { "speaker_uuid": [{"role": "user", "content": "..."}, ...] }
 conversation_history = {}
-MAX_HISTORY = 6
-
-# ─── TOKEN HELPERS ────────────────────────────────────────────────────────────
-
-def make_token(owner_uuid: str) -> str:
-    """Create a signed session token: uuid:timestamp:signature"""
-    ts = str(int(time.time()))
-    payload = f"{owner_uuid}:{ts}"
-    sig = hmac.new(TOKEN_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    return f"{payload}:{sig}"
-
-def validate_token(token: str) -> str | None:
-    """Validate token. Returns owner_uuid if valid, None if not."""
-    if not token or not TOKEN_SECRET:
-        return None
-    try:
-        parts = token.split(":")
-        if len(parts) != 3:
-            return None
-        owner_uuid, ts, sig = parts
-        payload = f"{owner_uuid}:{ts}"
-        expected = hmac.new(TOKEN_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected):
-            return None
-        return owner_uuid
-    except Exception:
-        return None
-
-def is_sl_request() -> bool:
-    """Check if request is coming from Second Life LSL."""
-    ua = request.headers.get("User-Agent", "")
-    return "Second-Life" in ua
-
-def require_auth(f):
-    """Decorator to require valid token on protected endpoints."""
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        # SL requests bypass token auth
-        if is_sl_request():
-            return f(*args, **kwargs)
-        token = request.headers.get("X-Session-Token", "")
-        if not validate_token(token):
-            return jsonify({"error": "Unauthorized"}), 401
-        return f(*args, **kwargs)
-    return decorated
-
-# ─── DB ───────────────────────────────────────────────────────────────────────
+MAX_HISTORY = 6  # keep last 6 exchanges (3 user + 3 assistant)
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -111,29 +58,6 @@ def init_db():
     conn.close()
 
 init_db()
-
-# ─── AUTH ─────────────────────────────────────────────────────────────────────
-
-@app.route("/auth", methods=["POST"])
-def auth():
-    """Validate PIN and return session token."""
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "Invalid JSON"}), 400
-
-    pin = data.get("pin", "").strip()
-    owner_uuid = data.get("owner_uuid", "").strip()
-
-    if not APP_PIN or not TOKEN_SECRET:
-        return jsonify({"error": "Server not configured"}), 503
-
-    if pin != APP_PIN or not owner_uuid:
-        return jsonify({"error": "Invalid PIN"}), 401
-
-    token = make_token(owner_uuid)
-    return jsonify({"token": token, "owner_uuid": owner_uuid}), 200
-
-# ─── HTML DASHBOARD ───────────────────────────────────────────────────────────
 
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -339,10 +263,7 @@ HTML = """<!DOCTYPE html>
 def index():
     return render_template_string(HTML)
 
-# ─── MEMORIES ─────────────────────────────────────────────────────────────────
-
 @app.route("/memories", methods=["GET"])
-@require_auth
 def list_memories():
     conn = get_db()
     cur = conn.cursor()
@@ -382,7 +303,6 @@ def list_memories():
     return jsonify({"count": len(items), "memories": items})
 
 @app.route("/memories", methods=["POST"])
-@require_auth
 def create_memory():
     data = request.get_json(silent=True)
     if not data:
@@ -407,7 +327,6 @@ def create_memory():
     return jsonify({"id": memory_id, "title": title, "content": content, "tags": data.get("tags", []), "metadata": data.get("metadata", {}), "created_at": now, "updated_at": now}), 201
 
 @app.route("/memories/<memory_id>", methods=["GET"])
-@require_auth
 def get_memory(memory_id):
     conn = get_db()
     cur = conn.cursor()
@@ -423,7 +342,6 @@ def get_memory(memory_id):
     return jsonify(row)
 
 @app.route("/memories/<memory_id>", methods=["PUT"])
-@require_auth
 def update_memory(memory_id):
     conn = get_db()
     cur = conn.cursor()
@@ -458,7 +376,6 @@ def update_memory(memory_id):
     return jsonify({"id": memory_id, "title": row["title"], "content": row["content"], "tags": row["tags_list"], "updated_at": now})
 
 @app.route("/memories/<memory_id>", methods=["DELETE"])
-@require_auth
 def delete_memory(memory_id):
     conn = get_db()
     cur = conn.cursor()
@@ -476,7 +393,6 @@ def delete_memory(memory_id):
 
 @app.route("/memories/recent/<owner_uuid>", methods=["GET"])
 def recent_memory(owner_uuid):
-    # SL only endpoint - no token required but checks SL user agent
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -490,8 +406,6 @@ def recent_memory(owner_uuid):
         return jsonify({"memory": "", "created_at": ""}), 200
     row = dict(row)
     return jsonify({"memory": row["content"], "created_at": row["created_at"]}), 200
-
-# ─── CONVERSATIONS ────────────────────────────────────────────────────────────
 
 @app.route("/conversations", methods=["POST"])
 def save_conversation():
@@ -509,6 +423,8 @@ def save_conversation():
     conn.commit()
     cur.close()
     conn.close()
+
+    # Trigger profile update in background
     try:
         is_whitelisted = data.get("is_whitelisted", False)
         depth = "full" if is_whitelisted else "light"
@@ -524,6 +440,7 @@ def save_conversation():
         )
     except Exception:
         pass
+
     return jsonify({"id": convo_id}), 201
 
 @app.route("/conversations", methods=["GET"])
@@ -540,8 +457,6 @@ def list_conversations():
     conn.close()
     return jsonify({"count": len(rows), "conversations": rows})
 
-# ─── CHAT ─────────────────────────────────────────────────────────────────────
-
 def clean_reply(text):
     replacements = {
         '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"',
@@ -556,7 +471,6 @@ def clean_reply(text):
     return text.strip()
 
 @app.route("/chat", methods=["POST"])
-@require_auth
 def chat_proxy():
     data = request.get_json(silent=True)
     if not data:
@@ -567,17 +481,33 @@ def chat_proxy():
     max_tokens = data.get("max_tokens", 200)
     speaker_key = data.get("speaker_key", "unknown")
 
+    # Build conversation history for this speaker
     if speaker_key not in conversation_history:
         conversation_history[speaker_key] = []
-
+    
+    # Add user message to history
     conversation_history[speaker_key].append({"role": "user", "content": user_message})
-
+    
+    # Keep only last MAX_HISTORY messages
     if len(conversation_history[speaker_key]) > MAX_HISTORY:
         conversation_history[speaker_key] = conversation_history[speaker_key][-MAX_HISTORY:]
+    
+    # Build messages array with system prompt + history
+    image_data = data.get("image")  # base64 data URI e.g. "data:image/jpeg;base64,..."
+
+    if image_data:
+        user_content = [
+            {"type": "text", "text": user_message or "What do you see?"},
+            {"type": "image_url", "image_url": {"url": image_data, "detail": "auto"}}
+        ]
+        vision_messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key][:-1] + [{"role": "user", "content": user_content}]
+    else:
+        vision_messages = None
 
     messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key]
 
-    if OLLAMA_URL:
+    # Try Ollama on Shadow PC first (vision not supported via Ollama)
+    if OLLAMA_URL and not image_data:
         try:
             ol_resp = http_requests.post(
                 f"{OLLAMA_URL}/api/chat",
@@ -598,6 +528,7 @@ def chat_proxy():
         except Exception:
             pass
 
+    # Fallback: OpenAI GPT-4o
     if not OPENAI_API_KEY:
         return jsonify({"error": "No AI backend available"}), 503
 
@@ -608,17 +539,15 @@ def chat_proxy():
             json={
                 "model": "gpt-4o",
                 "max_completion_tokens": max_tokens,
-                "messages": messages
+                "messages": vision_messages if vision_messages else messages
             },
-            timeout=20
+            timeout=30
         )
         reply = clean_reply(gpt_resp.json()["choices"][0]["message"]["content"])
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
         return jsonify({"reply": reply, "source": "gpt"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-# ─── PROFILES ─────────────────────────────────────────────────────────────────
 
 @app.route("/profile/<owner_uuid>", methods=["GET"])
 def get_profile(owner_uuid):
@@ -640,10 +569,11 @@ def update_profile():
     owner_uuid = data.get("owner_uuid", "")
     speaker_name = data.get("speaker_name", "")
     new_convo = data.get("conversation", "")
-    depth = data.get("depth", "full")
+    depth = data.get("depth", "full")  # "full" or "light"
     if not owner_uuid or not new_convo:
         return jsonify({"error": "Missing fields"}), 400
 
+    # Fetch existing profile
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT profile FROM profiles WHERE owner_uuid = %s", (owner_uuid,))
@@ -701,8 +631,6 @@ def update_profile():
         return jsonify({"profile": profile}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-# ─── ERROR HANDLERS ───────────────────────────────────────────────────────────
 
 @app.errorhandler(404)
 def not_found(e):
