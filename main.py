@@ -607,6 +607,8 @@ def chat_proxy():
             },
             timeout=30
         )
+        if gpt_resp.status_code != 200:
+            return jsonify({"error": "GPT error", "details": gpt_resp.json()}), 500
         reply = clean_reply(gpt_resp.json()["choices"][0]["message"]["content"])
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
         return jsonify({"reply": reply, "source": "gpt"})
