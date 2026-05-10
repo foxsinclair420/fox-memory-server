@@ -8,19 +8,63 @@ from datetime import datetime
 
 import requests as http_requests
 from flask import Flask, jsonify, request, render_template_string
+from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
+CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+APP_PIN = os.environ.get("APP_PIN", "")
+TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 
-# In-memory conversation history per speaker key
-# Format: { "speaker_uuid": [{"role": "user", "content": "..."}, ...] }
 conversation_history = {}
-MAX_HISTORY = 6  # keep last 6 exchanges (3 user + 3 assistant)
+MAX_HISTORY = 6
+
+# ─── TOKEN HELPERS ────────────────────────────────────────────────────────────
+
+def make_token(owner_uuid: str) -> str:
+    ts = str(int(time.time()))
+    payload = f"{owner_uuid}:{ts}"
+    sig = hmac.new(TOKEN_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}:{sig}"
+
+def validate_token(token: str):
+    if not token or not TOKEN_SECRET:
+        return None
+    try:
+        parts = token.split(":")
+        if len(parts) != 3:
+            return None
+        owner_uuid, ts, sig = parts
+        payload = f"{owner_uuid}:{ts}"
+        expected = hmac.new(TOKEN_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        return owner_uuid
+    except Exception:
+        return None
+
+def is_sl_request() -> bool:
+    ua = request.headers.get("User-Agent", "")
+    return "Second-Life" in ua
+
+def require_auth(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if is_sl_request():
+            return f(*args, **kwargs)
+        token = request.headers.get("X-Session-Token", "")
+        if not validate_token(token):
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+# ─── DB ───────────────────────────────────────────────────────────────────────
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -61,6 +105,23 @@ def init_db():
     conn.close()
 
 init_db()
+
+# ─── AUTH ─────────────────────────────────────────────────────────────────────
+
+@app.route("/auth", methods=["POST"])
+def auth():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+    pin = data.get("pin", "").strip()
+    owner_uuid = data.get("owner_uuid", "").strip()
+    if not APP_PIN or not TOKEN_SECRET:
+        return jsonify({"error": "Server not configured"}), 503
+    if pin != APP_PIN or not owner_uuid:
+        return jsonify({"error": "Invalid PIN"}), 401
+    token = make_token(owner_uuid)
+    return jsonify({"token": token, "owner_uuid": owner_uuid}), 200
+
 
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -496,7 +557,7 @@ def chat_proxy():
         conversation_history[speaker_key] = conversation_history[speaker_key][-MAX_HISTORY:]
     
     # Build messages array with system prompt + history
-    image_data = data.get("image")  # base64 data URI e.g. "data:image/jpeg;base64,..."
+    image_data = data.get("image")  # base64 data URI
 
     if image_data:
         user_content = [
@@ -509,7 +570,7 @@ def chat_proxy():
 
     messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key]
 
-    # Try Ollama on Shadow PC first (vision not supported via Ollama)
+    # Try Ollama on Shadow PC first (skip if image present)
     if OLLAMA_URL and not image_data:
         try:
             ol_resp = http_requests.post(
