@@ -17,7 +17,7 @@ CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OLLAMA_MODEL = "hf.co/QuantFactory/Qwen2.5-7B-Instruct-Uncensored-GGUF:Q4_K_M"
 APP_PIN = os.environ.get("APP_PIN", "")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 
@@ -556,8 +556,8 @@ def chat_proxy():
     if len(conversation_history[speaker_key]) > MAX_HISTORY:
         conversation_history[speaker_key] = conversation_history[speaker_key][-MAX_HISTORY:]
     
-    # Build messages array with system prompt + history
-    image_data = data.get("image")  # base64 data URI
+    if data.get("image"):
+        return jsonify({"error": "Image input is not supported by the current model"}), 415
 
     # Append owner status to system prompt if available
     owner_status = None
@@ -566,60 +566,29 @@ def chat_proxy():
     if owner_status:
         system_prompt = system_prompt + f" Owner current status: {owner_status}."
 
-
-    if image_data:
-        user_content = [
-            {"type": "text", "text": user_message or "What do you see?"},
-            {"type": "image_url", "image_url": {"url": image_data, "detail": "auto"}}
-        ]
-        vision_messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key][:-1] + [{"role": "user", "content": user_content}]
-    else:
-        vision_messages = None
-
     messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key]
 
-    # Try Ollama on Shadow PC first (skip if image present)
-    if OLLAMA_URL and not image_data:
-        try:
-            ol_resp = http_requests.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={
-                    "model": "hf.co/DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF:Q4_K_S",
-                    "stream": False,
-                    "options": {"num_predict": max_tokens},
-                    "messages": messages
-                },
-                timeout=30
-            )
-            if ol_resp.status_code == 200:
-                reply = clean_reply(ol_resp.json()["message"]["content"])
-                if "<think>" in reply:
-                    reply = reply.split("</think>")[-1].strip()
-                conversation_history[speaker_key].append({"role": "assistant", "content": reply})
-                return jsonify({"reply": reply, "source": "ollama"})
-        except Exception:
-            pass
-
-    # Fallback: OpenAI GPT-4o
-    if not OPENAI_API_KEY:
-        return jsonify({"error": "No AI backend available"}), 503
-
+    if not OLLAMA_URL:
+        return jsonify({"error": "OLLAMA_URL is not configured"}), 503
     try:
-        gpt_resp = http_requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+        ol_resp = http_requests.post(
+            f"{OLLAMA_URL}/api/chat",
             json={
-                "model": "gpt-4o",
-                "max_completion_tokens": max_tokens,
-                "messages": vision_messages if vision_messages else messages
+                "model": OLLAMA_MODEL,
+                "stream": False,
+                "options": {"num_predict": max_tokens},
+                "messages": messages
             },
-            timeout=30
+            timeout=60
         )
-        reply = clean_reply(gpt_resp.json()["choices"][0]["message"]["content"])
+        ol_resp.raise_for_status()
+        reply = clean_reply(ol_resp.json()["message"]["content"])
+        if "<think>" in reply:
+            reply = reply.split("</think>")[-1].strip()
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
-        return jsonify({"reply": reply, "source": "gpt"})
+        return jsonify({"reply": reply, "source": "ollama"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Ollama error: {str(e)}"}), 500
 
 @app.route("/status", methods=["POST"])
 @require_auth
@@ -683,9 +652,6 @@ def update_profile():
     cur.close()
     conn.close()
 
-    if not OPENAI_API_KEY:
-        return jsonify({"error": "No AI backend"}), 503
-
     existing_section = f"Current profile:\n{existing}\n\n" if existing else ""
 
     if depth == "light":
@@ -704,13 +670,15 @@ def update_profile():
             f"Do not list facts. Write it like notes a close friend would keep. "
             f"Do not mention that this is a profile or reference Fox. Just describe the person."
         )
+    if not OLLAMA_URL:
+        return jsonify({"error": "OLLAMA_URL is not configured"}), 503
     try:
         resp = http_requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            f"{OLLAMA_URL}/api/chat",
             json={
-                "model": "gpt-4o",
-                "max_completion_tokens": 200,
+                "model": OLLAMA_MODEL,
+                "stream": False,
+                "options": {"num_predict": 200},
                 "messages": [
                     {"role": "system", "content": "You maintain personality profiles of people based on their conversations."},
                     {"role": "user", "content": prompt}
@@ -718,7 +686,8 @@ def update_profile():
             },
             timeout=20
         )
-        profile = clean_reply(resp.json()["choices"][0]["message"]["content"].strip())
+        resp.raise_for_status()
+        profile = clean_reply(resp.json()["message"]["content"].strip())
         now = datetime.utcnow().isoformat() + "Z"
         conn = get_db()
         cur = conn.cursor()
