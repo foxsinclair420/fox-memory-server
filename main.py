@@ -1,13 +1,14 @@
 import json
 import logging
 import os
+import sys
 import uuid
 import hmac
 import hashlib
 import time
 from datetime import datetime
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
 
 import requests as http_requests
