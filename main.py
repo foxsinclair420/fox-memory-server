@@ -541,6 +541,7 @@ def chat_proxy():
         return jsonify({"error": "Invalid JSON"}), 400
 
     system_prompt = data.get("system", "")
+    print(f"[chat] system_prompt len={len(system_prompt)} preview={system_prompt[:120]!r}", flush=True)
     user_message = data.get("message", "")
     max_tokens = data.get("max_tokens", 200)
     speaker_key = data.get("speaker_key", "unknown")
