@@ -64,6 +64,7 @@ def _do_summarize(job):
         f"Summarize this conversation between Fox and {speaker_name}:\n\n{transcript}"
     )
 
+    logger.info("[summarize] calling Ollama for speaker=%s transcript_chars=%d", speaker_key, len(transcript))
     resp = http_requests.post(
         f"{OLLAMA_URL}/api/chat",
         json={
@@ -77,12 +78,14 @@ def _do_summarize(job):
         },
         timeout=45,
     )
+    logger.info("[summarize] Ollama responded status=%d for speaker=%s", resp.status_code, speaker_key)
     resp.raise_for_status()
     summary = clean_reply(resp.json()["message"]["content"].strip())
     if not summary:
         logger.warning("[summarize] empty summary returned for speaker=%s", speaker_key)
         return
 
+    logger.info("[summarize] writing to DB for speaker=%s", speaker_key)
     now = datetime.utcnow().isoformat() + "Z"
     memory_id = str(uuid.uuid4())
     speaker_type = "owner" if is_owner else "visitor"
@@ -103,14 +106,19 @@ def _do_summarize(job):
 
 
 def _summarize_worker():
+    logger.info("[summarize] worker thread started")
     while True:
-        job = summarize_queue.get()
         try:
-            _do_summarize(job)
+            job = summarize_queue.get()
+            logger.info("[summarize] dequeued job for speaker=%s", job.get("speaker_key"))
+            try:
+                _do_summarize(job)
+            except Exception as e:
+                logger.error("[summarize] failed for speaker=%s: %s", job.get("speaker_key"), e)
+            finally:
+                summarize_queue.task_done()
         except Exception as e:
-            logger.error("[summarize] failed for speaker=%s: %s", job.get("speaker_key"), e)
-        finally:
-            summarize_queue.task_done()
+            logger.error("[summarize] worker loop error (continuing): %s", e)
 
 
 threading.Thread(target=_summarize_worker, daemon=True).start()
