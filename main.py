@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import queue
 import sys
+import threading
 import uuid
 import hmac
 import hashlib
@@ -28,6 +30,90 @@ TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 
 conversation_history = {}
 MAX_HISTORY = 6
+
+# ─── BACKGROUND SUMMARIZATION ─────────────────────────────────────────────────
+# Single-worker assumption: conversation_history and summarization_counters are
+# in-process dicts. This is safe on Render free/starter with --workers 1.
+# If workers are ever bumped above 1, move these to Redis or history will be
+# split across processes and summaries will be incomplete.
+
+SUMMARIZE_EVERY = 6
+summarization_counters = {}  # speaker_key -> turns since last summary
+summarize_queue = queue.Queue()
+
+
+def _do_summarize(job):
+    speaker_key = job["speaker_key"]
+    speaker_name = job["speaker_name"]
+    messages = job["messages"]
+    is_owner = job["is_owner"]
+
+    lines = []
+    for m in messages:
+        role_label = "Fox" if m["role"] == "assistant" else speaker_name
+        lines.append(f"{role_label}: {m['content']}")
+    transcript = "\n".join(lines)
+
+    summarizer_system = (
+        "You produce concise conversation summaries. "
+        "Write 1-3 sentences, third person, past tense. "
+        "Focus on what was discussed and any decisions made. "
+        "No personality commentary, no flourishes. Be factual and brief."
+    )
+    summarizer_user = (
+        f"Summarize this conversation between Fox and {speaker_name}:\n\n{transcript}"
+    )
+
+    resp = http_requests.post(
+        f"{OLLAMA_URL}/api/chat",
+        json={
+            "model": OLLAMA_MODEL,
+            "stream": False,
+            "options": {"num_predict": 120},
+            "messages": [
+                {"role": "system", "content": summarizer_system},
+                {"role": "user", "content": summarizer_user},
+            ],
+        },
+        timeout=45,
+    )
+    resp.raise_for_status()
+    summary = clean_reply(resp.json()["message"]["content"].strip())
+    if not summary:
+        logger.warning("[summarize] empty summary returned for speaker=%s", speaker_key)
+        return
+
+    now = datetime.utcnow().isoformat() + "Z"
+    memory_id = str(uuid.uuid4())
+    speaker_type = "owner" if is_owner else "visitor"
+    tags = json.dumps([speaker_key, "auto-summary", speaker_type])
+    metadata = json.dumps({"speaker_key": speaker_key, "turn_count": len(messages)})
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO memories (id, title, content, tags, metadata, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (memory_id, f"Conversation with {speaker_name}", summary, tags, metadata, now, now),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("[summarize] saved memory %s for speaker=%s (%s)", memory_id, speaker_key, speaker_type)
+
+
+def _summarize_worker():
+    while True:
+        job = summarize_queue.get()
+        try:
+            _do_summarize(job)
+        except Exception as e:
+            logger.error("[summarize] failed for speaker=%s: %s", job.get("speaker_key"), e)
+        finally:
+            summarize_queue.task_done()
+
+
+threading.Thread(target=_summarize_worker, daemon=True).start()
 
 # ─── TOKEN HELPERS ────────────────────────────────────────────────────────────
 
@@ -550,6 +636,8 @@ def chat_proxy():
     user_message = data.get("message", "")
     max_tokens = data.get("max_tokens", 200)
     speaker_key = data.get("speaker_key", "unknown")
+    speaker_name = data.get("speaker_name", speaker_key)
+    is_owner = data.get("is_owner", False)
 
     # Build conversation history for this speaker
     if speaker_key not in conversation_history:
@@ -592,6 +680,19 @@ def chat_proxy():
         if "<think>" in reply:
             reply = reply.split("</think>")[-1].strip()
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
+
+        # Enqueue summarization after every SUMMARIZE_EVERY turns
+        summarization_counters[speaker_key] = summarization_counters.get(speaker_key, 0) + 1
+        if summarization_counters[speaker_key] >= SUMMARIZE_EVERY:
+            summarization_counters[speaker_key] = 0
+            summarize_queue.put_nowait({
+                "speaker_key": speaker_key,
+                "speaker_name": speaker_name,
+                "messages": list(conversation_history[speaker_key]),
+                "is_owner": is_owner,
+            })
+            logger.info("[chat] summarization enqueued for speaker=%s", speaker_key)
+
         return jsonify({"reply": reply, "source": "ollama"})
     except Exception as e:
         return jsonify({"error": f"Ollama error: {str(e)}"}), 500
