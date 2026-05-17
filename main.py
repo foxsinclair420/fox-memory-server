@@ -122,7 +122,18 @@ def _summarize_worker():
             logger.error("[summarize] worker loop error (continuing): %s", e)
 
 
-threading.Thread(target=_summarize_worker, daemon=True).start()
+_worker_started = False
+_worker_lock = threading.Lock()
+
+def _ensure_summarize_worker():
+    global _worker_started
+    if _worker_started:
+        return
+    with _worker_lock:
+        if _worker_started:
+            return
+        threading.Thread(target=_summarize_worker, daemon=True).start()
+        _worker_started = True
 
 # ─── TOKEN HELPERS ────────────────────────────────────────────────────────────
 
@@ -636,6 +647,8 @@ def clean_reply(text):
 
 @app.route("/chat", methods=["POST"])
 def chat_proxy():
+    _ensure_summarize_worker()
+
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
