@@ -106,11 +106,12 @@ def _do_summarize(job):
 
 
 def _summarize_worker():
-    logger.info("[summarize] worker thread started")
+    logger.info("[summarize] worker thread started pid=%d", os.getpid())
     while True:
+        logger.info("[summarize] waiting for job (pid=%d)", os.getpid())
         try:
             job = summarize_queue.get()
-            logger.info("[summarize] dequeued job for speaker=%s", job.get("speaker_key"))
+            logger.info("[summarize] dequeued job for speaker=%s pid=%d", job.get("speaker_key"), os.getpid())
             try:
                 _do_summarize(job)
             except Exception as e:
@@ -699,7 +700,7 @@ def chat_proxy():
                 "messages": list(conversation_history[speaker_key]),
                 "is_owner": is_owner,
             })
-            logger.info("[chat] summarization enqueued for speaker=%s", speaker_key)
+            logger.info("[chat] summarization enqueued for speaker=%s pid=%d", speaker_key, os.getpid())
 
         return jsonify({"reply": reply, "source": "ollama"})
     except Exception as e:
