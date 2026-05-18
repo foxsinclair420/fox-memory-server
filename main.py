@@ -30,6 +30,24 @@ TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 
 conversation_history = {}
 MAX_HISTORY = 6
+conversation_ids = {}  # speaker_key -> current conversation_id (session-scoped, resets on restart)
+
+CURRENT_PROMPT_VERSION = 1
+
+SUMMARY_CONFIGS = {
+    "short": {
+        "max_tokens": 120,
+        "instruction": "Write 2-3 sentences, third person, past tense. Focus on what was discussed and any decisions made. No personality commentary.",
+    },
+    "medium": {
+        "max_tokens": 400,
+        "instruction": "Write one paragraph (4-6 sentences), third person, past tense. Cover main topics, decisions, and general tone. No personality commentary.",
+    },
+    "long": {
+        "max_tokens": 1200,
+        "instruction": "Write 3-4 paragraphs, third person, past tense. Cover topics in detail, decisions made, emotional tone, anything notable. Be thorough and specific.",
+    },
+}
 
 # ─── BACKGROUND SUMMARIZATION ─────────────────────────────────────────────────
 # Single-worker assumption: conversation_history and summarization_counters are
@@ -43,66 +61,78 @@ summarize_queue = queue.Queue()
 
 
 def _do_summarize(job):
-    speaker_key = job["speaker_key"]
-    speaker_name = job["speaker_name"]
-    messages = job["messages"]
-    is_owner = job["is_owner"]
+    conversation_id = job["conversation_id"]
+    speaker_uuid    = job["speaker_uuid"]
+    length          = job.get("length", "short")
+    cfg             = SUMMARY_CONFIGS.get(length, SUMMARY_CONFIGS["short"])
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT role, content FROM conversation_turns WHERE conversation_id = %s ORDER BY created_at ASC",
+        (conversation_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        logger.warning("[summarize] no turns found for conversation_id=%s", conversation_id)
+        return
 
     lines = []
-    for m in messages:
-        role_label = "Fox" if m["role"] == "assistant" else speaker_name
-        lines.append(f"{role_label}: {m['content']}")
+    for r in rows:
+        label = "Fox" if r["role"] == "fox" else speaker_uuid
+        lines.append(f"{label}: {r['content']}")
     transcript = "\n".join(lines)
 
     summarizer_system = (
         "You produce concise conversation summaries. "
-        "Write 1-3 sentences, third person, past tense. "
-        "Focus on what was discussed and any decisions made. "
-        "No personality commentary, no flourishes. Be factual and brief."
+        "Third person, past tense. No personality commentary. "
+        + cfg["instruction"]
     )
-    summarizer_user = (
-        f"Summarize this conversation between Fox and {speaker_name}:\n\n{transcript}"
-    )
+    summarizer_user = f"Summarize this conversation:\n\n{transcript}"
 
-    logger.info("[summarize] calling Ollama for speaker=%s transcript_chars=%d", speaker_key, len(transcript))
+    logger.info("[summarize] calling Ollama conversation_id=%s length=%s transcript_chars=%d",
+                conversation_id, length, len(transcript))
     resp = http_requests.post(
         f"{OLLAMA_URL}/api/chat",
         json={
             "model": OLLAMA_MODEL,
             "stream": False,
-            "options": {"num_predict": 120},
+            "options": {"num_predict": cfg["max_tokens"]},
             "messages": [
                 {"role": "system", "content": summarizer_system},
-                {"role": "user", "content": summarizer_user},
+                {"role": "user",   "content": summarizer_user},
             ],
         },
-        timeout=45,
+        timeout=60,
     )
-    logger.info("[summarize] Ollama responded status=%d for speaker=%s", resp.status_code, speaker_key)
+    logger.info("[summarize] Ollama responded status=%d conversation_id=%s", resp.status_code, conversation_id)
     resp.raise_for_status()
     summary = clean_reply(resp.json()["message"]["content"].strip())
     if not summary:
-        logger.warning("[summarize] empty summary returned for speaker=%s", speaker_key)
+        logger.warning("[summarize] empty summary for conversation_id=%s", conversation_id)
         return
 
-    logger.info("[summarize] writing to DB for speaker=%s", speaker_key)
+    logger.info("[summarize] writing to summaries table conversation_id=%s", conversation_id)
     now = datetime.utcnow().isoformat() + "Z"
-    memory_id = str(uuid.uuid4())
-    speaker_type = "owner" if is_owner else "visitor"
-    tags = json.dumps([speaker_key, "auto-summary", speaker_type])
-    metadata = json.dumps({"speaker_key": speaker_key, "turn_count": len(messages)})
-
+    summary_id = str(uuid.uuid4())
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO memories (id, title, content, tags, metadata, speaker_uuid, created_at, updated_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-        (memory_id, f"Conversation with {speaker_name}", summary, tags, metadata, speaker_key, now, now),
+        """
+        INSERT INTO summaries (id, conversation_id, speaker_uuid, length, prompt_version, content, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (conversation_id, speaker_uuid, length, prompt_version)
+        DO UPDATE SET content = EXCLUDED.content, created_at = EXCLUDED.created_at
+        """,
+        (summary_id, conversation_id, speaker_uuid, length, CURRENT_PROMPT_VERSION, summary, now),
     )
     conn.commit()
     cur.close()
     conn.close()
-    logger.info("[summarize] saved memory %s for speaker=%s (%s)", memory_id, speaker_key, speaker_type)
+    logger.info("[summarize] saved summary %s conversation_id=%s length=%s", summary_id, conversation_id, length)
 
 
 def _summarize_worker():
@@ -184,27 +214,43 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS memories")
+    cur.execute("DROP TABLE IF EXISTS conversations")
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS memories (
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            content TEXT NOT NULL,
-            tags TEXT DEFAULT '[]',
-            metadata TEXT DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS conversation_turns (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            speaker_uuid    TEXT NOT NULL,
+            owner_uuid      TEXT NOT NULL,
+            role            TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_turns_convo   ON conversation_turns(conversation_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_turns_speaker ON conversation_turns(speaker_uuid)")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS summaries (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            speaker_uuid    TEXT NOT NULL,
+            length          TEXT NOT NULL,
+            prompt_version  INTEGER NOT NULL,
+            content         TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            UNIQUE(conversation_id, speaker_uuid, length, prompt_version)
         )
     """)
     cur.execute("""
-        ALTER TABLE memories ADD COLUMN IF NOT EXISTS speaker_uuid TEXT
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS conversations (
-            id TEXT PRIMARY KEY,
-            owner_uuid TEXT NOT NULL,
-            speaker_name TEXT,
-            raw_log TEXT NOT NULL,
-            created_at TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS directives (
+            id          TEXT PRIMARY KEY,
+            owner_uuid  TEXT NOT NULL,
+            category    TEXT NOT NULL,
+            title       TEXT,
+            content     TEXT NOT NULL,
+            priority    INTEGER DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
         )
     """)
     cur.execute("""
@@ -441,204 +487,210 @@ HTML = """<!DOCTYPE html>
 def index():
     return render_template_string(HTML)
 
-@app.route("/memories", methods=["GET"])
-def list_memories():
-    conn = get_db()
-    cur = conn.cursor()
-    tag = request.args.get("tag")
-    search = request.args.get("search", "").lower()
-    limit = request.args.get("limit", None)
-    speaker_uuid = request.args.get("speaker_uuid")
-    query = "SELECT * FROM memories"
-    conditions = []
-    params = []
-    if search:
-        conditions.append("(LOWER(content) ILIKE %s OR LOWER(title) ILIKE %s)")
-        params += [f"%{search}%", f"%{search}%"]
-    if tag:
-        conditions.append("tags ILIKE %s")
-        params.append(f"%{tag}%")
-    if speaker_uuid:
-        conditions.append("speaker_uuid = %s")
-        params.append(speaker_uuid)
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY created_at DESC"
-    if limit:
-        query += " LIMIT %s"
-        params.append(int(limit))
-    cur.execute(query, params)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    items = []
-    for row in rows:
-        row = dict(row)
-        row["tags"] = json.loads(row["tags"]) if row["tags"] else []
-        row["metadata"] = json.loads(row["metadata"]) if row["metadata"] else {}
-        if row.get("content"):
-            c = row["content"].encode("ascii", "ignore").decode("ascii")
-            if len(c) > 400:
-                c = c[:400] + "..."
-            row["content"] = c
-        items.append(row)
-    return jsonify({"count": len(items), "memories": items})
+# ─── CONVERSATION TURNS ───────────────────────────────────────────────────────
 
-@app.route("/memories", methods=["POST"])
-def create_memory():
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "Request body must be valid JSON"}), 400
-    content = (data.get("content") or "").strip()
-    if not content:
-        return jsonify({"error": "'content' is required"}), 400
-    memory_id = str(uuid.uuid4())
-    now = datetime.utcnow().isoformat() + "Z"
-    tags = json.dumps(data.get("tags", []))
-    metadata = json.dumps(data.get("metadata", {}))
-    title = (data.get("title") or "").strip() or None
-    speaker_uuid = (data.get("speaker_uuid") or "").strip() or None
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO memories (id, title, content, tags, metadata, speaker_uuid, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-        (memory_id, title, content, tags, metadata, speaker_uuid, now, now)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"id": memory_id, "title": title, "content": content, "tags": data.get("tags", []), "metadata": data.get("metadata", {}), "speaker_uuid": speaker_uuid, "created_at": now, "updated_at": now}), 201
-
-@app.route("/memories/<memory_id>", methods=["GET"])
-def get_memory(memory_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM memories WHERE id = %s", (memory_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not row:
-        return jsonify({"error": "Memory not found"}), 404
-    row = dict(row)
-    row["tags"] = json.loads(row["tags"]) if row["tags"] else []
-    row["metadata"] = json.loads(row["metadata"]) if row["metadata"] else {}
-    return jsonify(row)
-
-@app.route("/memories/<memory_id>", methods=["PUT"])
-def update_memory(memory_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM memories WHERE id = %s", (memory_id,))
-    row = cur.fetchone()
-    if not row:
-        cur.close()
-        conn.close()
-        return jsonify({"error": "Memory not found"}), 404
-    data = request.get_json(silent=True)
-    if not data:
-        cur.close()
-        conn.close()
-        return jsonify({"error": "Request body must be valid JSON"}), 400
-    row = dict(row)
-    if "content" in data:
-        row["content"] = (data["content"] or "").strip()
-    if "title" in data:
-        row["title"] = (data["title"] or "").strip() or None
-    if "tags" in data:
-        row["tags_list"] = data["tags"]
-    else:
-        row["tags_list"] = json.loads(row["tags"]) if row["tags"] else []
-    now = datetime.utcnow().isoformat() + "Z"
-    cur.execute(
-        "UPDATE memories SET title=%s, content=%s, tags=%s, updated_at=%s WHERE id=%s",
-        (row["title"], row["content"], json.dumps(row["tags_list"]), now, memory_id)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"id": memory_id, "title": row["title"], "content": row["content"], "tags": row["tags_list"], "updated_at": now})
-
-@app.route("/memories/<memory_id>", methods=["DELETE"])
-def delete_memory(memory_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM memories WHERE id = %s", (memory_id,))
-    row = cur.fetchone()
-    if not row:
-        cur.close()
-        conn.close()
-        return jsonify({"error": "Memory not found"}), 404
-    cur.execute("DELETE FROM memories WHERE id = %s", (memory_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"message": "Memory deleted"})
-
-@app.route("/memories/recent/<owner_uuid>", methods=["GET"])
-def recent_memory(owner_uuid):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM memories WHERE tags ILIKE %s ORDER BY created_at DESC LIMIT 1",
-        (f"%{owner_uuid}%",)
-    )
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not row:
-        return jsonify({"memory": "", "created_at": ""}), 200
-    row = dict(row)
-    return jsonify({"memory": row["content"], "created_at": row["created_at"]}), 200
-
-@app.route("/conversations", methods=["POST"])
-def save_conversation():
+@app.route("/conversations/turns", methods=["POST"])
+def post_turn():
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
-    convo_id = str(uuid.uuid4())
+    conversation_id = (data.get("conversation_id") or "").strip()
+    speaker_uuid    = (data.get("speaker_uuid") or "").strip()
+    role            = (data.get("role") or "").strip()
+    content         = (data.get("content") or "").strip()
+    if not conversation_id or not speaker_uuid or not role or not content:
+        return jsonify({"error": "conversation_id, speaker_uuid, role, and content are required"}), 400
+    if role not in ("user", "fox"):
+        return jsonify({"error": "role must be 'user' or 'fox'"}), 400
+    owner_uuid = (data.get("owner_uuid") or "").strip()
+    turn_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat() + "Z"
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO conversations (id, owner_uuid, speaker_name, raw_log, created_at) VALUES (%s, %s, %s, %s, %s)",
-        (convo_id, data.get("owner_uuid", ""), data.get("speaker_name", ""), data.get("raw_log", ""), now)
+        "INSERT INTO conversation_turns (id, conversation_id, speaker_uuid, owner_uuid, role, content, created_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (turn_id, conversation_id, speaker_uuid, owner_uuid, role, content, now),
     )
     conn.commit()
     cur.close()
     conn.close()
+    return jsonify({"id": turn_id, "conversation_id": conversation_id, "created_at": now}), 201
 
-    # Trigger profile update in background
-    try:
-        is_whitelisted = data.get("is_whitelisted", False)
-        depth = "full" if is_whitelisted else "light"
-        http_requests.post(
-            "http://localhost:" + str(int(os.environ.get("PORT", 3000))) + "/profile/update",
-            json={
-                "owner_uuid": data.get("owner_uuid", ""),
-                "speaker_name": data.get("speaker_name", ""),
-                "conversation": data.get("raw_log", ""),
-                "depth": depth
-            },
-            timeout=25
-        )
-    except Exception:
-        pass
 
-    return jsonify({"id": convo_id}), 201
-
-@app.route("/conversations", methods=["GET"])
-def list_conversations():
+@app.route("/conversations/<conversation_id>", methods=["GET"])
+def get_conversation(conversation_id):
     conn = get_db()
     cur = conn.cursor()
-    owner = request.args.get("owner_uuid")
-    if owner:
-        cur.execute("SELECT * FROM conversations WHERE owner_uuid = %s ORDER BY created_at DESC", (owner,))
-    else:
-        cur.execute("SELECT * FROM conversations ORDER BY created_at DESC")
+    cur.execute(
+        "SELECT * FROM conversation_turns WHERE conversation_id = %s ORDER BY created_at ASC",
+        (conversation_id,),
+    )
     rows = [dict(r) for r in cur.fetchall()]
     cur.close()
     conn.close()
-    return jsonify({"count": len(rows), "conversations": rows})
+    if not rows:
+        return jsonify({"error": "Conversation not found"}), 404
+    return jsonify({"conversation_id": conversation_id, "turns": rows})
+
+
+# ─── SUMMARIES ────────────────────────────────────────────────────────────────
+
+@app.route("/summaries", methods=["GET"])
+def get_summary():
+    conversation_id = request.args.get("conversation_id", "").strip()
+    speaker_uuid    = request.args.get("speaker_uuid", "").strip()
+    length          = request.args.get("length", "short").strip()
+    if not conversation_id or not speaker_uuid:
+        return jsonify({"error": "conversation_id and speaker_uuid are required"}), 400
+    if length not in SUMMARY_CONFIGS:
+        return jsonify({"error": f"length must be one of {list(SUMMARY_CONFIGS)}"}), 400
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM summaries WHERE conversation_id=%s AND speaker_uuid=%s AND length=%s AND prompt_version=%s",
+        (conversation_id, speaker_uuid, length, CURRENT_PROMPT_VERSION),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if row:
+        return jsonify({**dict(row), "cached": True})
+
+    if not OLLAMA_URL:
+        return jsonify({"error": "OLLAMA_URL is not configured"}), 503
+
+    try:
+        _do_summarize({
+            "conversation_id": conversation_id,
+            "speaker_uuid":    speaker_uuid,
+            "owner_uuid":      "",
+            "length":          length,
+        })
+    except Exception as e:
+        logger.error("[summaries] on-demand generation failed: %s", e)
+        return jsonify({"error": f"Summary generation failed: {e}"}), 500
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM summaries WHERE conversation_id=%s AND speaker_uuid=%s AND length=%s AND prompt_version=%s",
+        (conversation_id, speaker_uuid, length, CURRENT_PROMPT_VERSION),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return jsonify({"error": "No turns found for this conversation"}), 404
+    return jsonify({**dict(row), "cached": False})
+
+
+# ─── DIRECTIVES ───────────────────────────────────────────────────────────────
+
+@app.route("/directives", methods=["POST"])
+def create_directive():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+    owner_uuid = (data.get("owner_uuid") or "").strip()
+    category   = (data.get("category") or "").strip()
+    content    = (data.get("content") or "").strip()
+    if not owner_uuid or not category or not content:
+        return jsonify({"error": "owner_uuid, category, and content are required"}), 400
+    directive_id = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat() + "Z"
+    title    = (data.get("title") or "").strip() or None
+    priority = int(data.get("priority", 0))
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO directives (id, owner_uuid, category, title, content, priority, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (directive_id, owner_uuid, category, title, content, priority, now, now),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"id": directive_id, "owner_uuid": owner_uuid, "category": category,
+                    "title": title, "content": content, "priority": priority,
+                    "created_at": now, "updated_at": now}), 201
+
+
+@app.route("/directives", methods=["GET"])
+def list_directives():
+    owner_uuid = request.args.get("owner_uuid", "").strip()
+    category   = request.args.get("category", "").strip()
+    if not owner_uuid:
+        return jsonify({"error": "owner_uuid is required"}), 400
+    conn = get_db()
+    cur = conn.cursor()
+    if category:
+        cur.execute(
+            "SELECT * FROM directives WHERE owner_uuid=%s AND category=%s ORDER BY priority DESC, created_at ASC",
+            (owner_uuid, category),
+        )
+    else:
+        cur.execute(
+            "SELECT * FROM directives WHERE owner_uuid=%s ORDER BY priority DESC, created_at ASC",
+            (owner_uuid,),
+        )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return jsonify({"count": len(rows), "directives": rows})
+
+
+@app.route("/directives/<directive_id>", methods=["PUT"])
+def update_directive(directive_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM directives WHERE id = %s", (directive_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return jsonify({"error": "Directive not found"}), 404
+    data = request.get_json(silent=True)
+    if not data:
+        cur.close()
+        conn.close()
+        return jsonify({"error": "Invalid JSON"}), 400
+    row = dict(row)
+    if "category" in data:
+        row["category"] = (data["category"] or "").strip()
+    if "title" in data:
+        row["title"] = (data["title"] or "").strip() or None
+    if "content" in data:
+        row["content"] = (data["content"] or "").strip()
+    if "priority" in data:
+        row["priority"] = int(data["priority"])
+    now = datetime.utcnow().isoformat() + "Z"
+    cur.execute(
+        "UPDATE directives SET category=%s, title=%s, content=%s, priority=%s, updated_at=%s WHERE id=%s",
+        (row["category"], row["title"], row["content"], row["priority"], now, directive_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({**row, "updated_at": now})
+
+
+@app.route("/directives/<directive_id>", methods=["DELETE"])
+def delete_directive(directive_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM directives WHERE id = %s", (directive_id,))
+    if not cur.fetchone():
+        cur.close()
+        conn.close()
+        return jsonify({"error": "Directive not found"}), 404
+    cur.execute("DELETE FROM directives WHERE id = %s", (directive_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Directive deleted"})
 
 def clean_reply(text):
     replacements = {
@@ -661,27 +713,25 @@ def chat_proxy():
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
 
-    system_prompt = data.get("system", "")
+    system_prompt   = data.get("system", "")
     logger.info("[chat] system_prompt len=%d preview=%r", len(system_prompt), system_prompt[:120])
-    user_message = data.get("message", "")
-    max_tokens = data.get("max_tokens", 200)
-    speaker_key = data.get("speaker_key", "unknown")
-    speaker_name = data.get("speaker_name", speaker_key)
-    is_owner = data.get("is_owner", False)
+    user_message    = data.get("message", "")
+    max_tokens      = data.get("max_tokens", 200)
+    speaker_key     = data.get("speaker_key", "unknown")
+    speaker_name    = data.get("speaker_name", speaker_key)
+    is_owner        = data.get("is_owner", False)
+    owner_uuid      = data.get("owner_uuid", "")
+    conversation_id = conversation_ids.setdefault(speaker_key, str(uuid.uuid4()))
 
-    # Build conversation history for this speaker
-    if speaker_key not in conversation_history:
-        conversation_history[speaker_key] = []
-    
-    # Add user message to history
-    conversation_history[speaker_key].append({"role": "user", "content": user_message})
-    
-    # Keep only last MAX_HISTORY messages
-    if len(conversation_history[speaker_key]) > MAX_HISTORY:
-        conversation_history[speaker_key] = conversation_history[speaker_key][-MAX_HISTORY:]
-    
     if data.get("image"):
         return jsonify({"error": "Image input is not supported by the current model"}), 415
+
+    # Hot cache for Ollama context window
+    if speaker_key not in conversation_history:
+        conversation_history[speaker_key] = []
+    conversation_history[speaker_key].append({"role": "user", "content": user_message})
+    if len(conversation_history[speaker_key]) > MAX_HISTORY:
+        conversation_history[speaker_key] = conversation_history[speaker_key][-MAX_HISTORY:]
 
     # Append owner status to system prompt if available
     owner_status = None
@@ -701,9 +751,9 @@ def chat_proxy():
                 "model": OLLAMA_MODEL,
                 "stream": False,
                 "options": {"num_predict": max_tokens},
-                "messages": messages
+                "messages": messages,
             },
-            timeout=60
+            timeout=60,
         )
         ol_resp.raise_for_status()
         reply = clean_reply(ol_resp.json()["message"]["content"])
@@ -711,17 +761,34 @@ def chat_proxy():
             reply = reply.split("</think>")[-1].strip()
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
 
+        # Persist both turns to the canonical store
+        now = datetime.utcnow().isoformat() + "Z"
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO conversation_turns (id, conversation_id, speaker_uuid, owner_uuid, role, content, created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s), (%s,%s,%s,%s,%s,%s,%s)",
+                (str(uuid.uuid4()), conversation_id, speaker_key, owner_uuid, "user", user_message, now,
+                 str(uuid.uuid4()), conversation_id, speaker_key, owner_uuid, "fox",  reply,        now),
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as db_err:
+            logger.error("[chat] turn write failed: %s", db_err)
+
         # Enqueue summarization after every SUMMARIZE_EVERY turns
         summarization_counters[speaker_key] = summarization_counters.get(speaker_key, 0) + 1
         if summarization_counters[speaker_key] >= SUMMARIZE_EVERY:
             summarization_counters[speaker_key] = 0
             summarize_queue.put_nowait({
-                "speaker_key": speaker_key,
-                "speaker_name": speaker_name,
-                "messages": list(conversation_history[speaker_key]),
-                "is_owner": is_owner,
+                "conversation_id": conversation_id,
+                "speaker_uuid":    speaker_key,
+                "owner_uuid":      owner_uuid,
+                "length":          "short",
             })
-            logger.info("[chat] summarization enqueued for speaker=%s pid=%d", speaker_key, os.getpid())
+            logger.info("[chat] summarization enqueued conversation_id=%s pid=%d", conversation_id, os.getpid())
 
         return jsonify({"reply": reply, "source": "ollama"})
     except Exception as e:
