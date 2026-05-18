@@ -95,9 +95,9 @@ def _do_summarize(job):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO memories (id, title, content, tags, metadata, created_at, updated_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-        (memory_id, f"Conversation with {speaker_name}", summary, tags, metadata, now, now),
+        "INSERT INTO memories (id, title, content, tags, metadata, speaker_uuid, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (memory_id, f"Conversation with {speaker_name}", summary, tags, metadata, speaker_key, now, now),
     )
     conn.commit()
     cur.close()
@@ -194,6 +194,9 @@ def init_db():
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
+    """)
+    cur.execute("""
+        ALTER TABLE memories ADD COLUMN IF NOT EXISTS speaker_uuid TEXT
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
@@ -445,6 +448,7 @@ def list_memories():
     tag = request.args.get("tag")
     search = request.args.get("search", "").lower()
     limit = request.args.get("limit", None)
+    speaker_uuid = request.args.get("speaker_uuid")
     query = "SELECT * FROM memories"
     conditions = []
     params = []
@@ -454,6 +458,9 @@ def list_memories():
     if tag:
         conditions.append("tags ILIKE %s")
         params.append(f"%{tag}%")
+    if speaker_uuid:
+        conditions.append("speaker_uuid = %s")
+        params.append(speaker_uuid)
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY created_at DESC"
@@ -490,16 +497,17 @@ def create_memory():
     tags = json.dumps(data.get("tags", []))
     metadata = json.dumps(data.get("metadata", {}))
     title = (data.get("title") or "").strip() or None
+    speaker_uuid = (data.get("speaker_uuid") or "").strip() or None
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO memories (id, title, content, tags, metadata, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-        (memory_id, title, content, tags, metadata, now, now)
+        "INSERT INTO memories (id, title, content, tags, metadata, speaker_uuid, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (memory_id, title, content, tags, metadata, speaker_uuid, now, now)
     )
     conn.commit()
     cur.close()
     conn.close()
-    return jsonify({"id": memory_id, "title": title, "content": content, "tags": data.get("tags", []), "metadata": data.get("metadata", {}), "created_at": now, "updated_at": now}), 201
+    return jsonify({"id": memory_id, "title": title, "content": content, "tags": data.get("tags", []), "metadata": data.get("metadata", {}), "speaker_uuid": speaker_uuid, "created_at": now, "updated_at": now}), 201
 
 @app.route("/memories/<memory_id>", methods=["GET"])
 def get_memory(memory_id):
