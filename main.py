@@ -739,6 +739,36 @@ def get_conversation(conversation_id):
     return jsonify({"conversation_id": conversation_id, "turns": rows})
 
 
+@app.route("/conversations/turns/list", methods=["GET"])
+def list_turns():
+    owner_uuid = request.args.get("owner_uuid", "").strip()
+    if not owner_uuid:
+        return jsonify({"error": "owner_uuid is required"}), 400
+    try:
+        limit = min(int(request.args.get("limit", 500)), 1000)
+    except (ValueError, TypeError):
+        limit = 500
+    before = request.args.get("before", "").strip()
+    conn = get_db()
+    cur = conn.cursor()
+    if before:
+        cur.execute(
+            "SELECT * FROM conversation_turns WHERE owner_uuid=%s AND created_at < %s "
+            "ORDER BY created_at DESC LIMIT %s",
+            (owner_uuid, before, limit),
+        )
+    else:
+        cur.execute(
+            "SELECT * FROM conversation_turns WHERE owner_uuid=%s "
+            "ORDER BY created_at DESC LIMIT %s",
+            (owner_uuid, limit),
+        )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return jsonify({"count": len(rows), "turns": rows})
+
+
 # ─── SUMMARIES ────────────────────────────────────────────────────────────────
 
 @app.route("/summaries", methods=["GET"])
@@ -790,6 +820,26 @@ def get_summary():
     if not row:
         return jsonify({"error": "No turns found for this conversation"}), 404
     return jsonify({**dict(row), "cached": False})
+
+
+@app.route("/summaries/list", methods=["GET"])
+def list_summaries():
+    owner_uuid = request.args.get("owner_uuid", "").strip()
+    if not owner_uuid:
+        return jsonify({"error": "owner_uuid is required"}), 400
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT s.* FROM summaries s "
+        "WHERE s.conversation_id IN ("
+        "    SELECT DISTINCT conversation_id FROM conversation_turns WHERE owner_uuid=%s"
+        ") ORDER BY s.created_at DESC",
+        (owner_uuid,),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return jsonify({"count": len(rows), "summaries": rows})
 
 
 # ─── DIRECTIVES ───────────────────────────────────────────────────────────────
