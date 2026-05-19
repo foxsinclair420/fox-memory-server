@@ -24,7 +24,7 @@ CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
-OLLAMA_MODEL = "hf.co/QuantFactory/Qwen2.5-7B-Instruct-Uncensored-GGUF:Q4_K_M"
+OLLAMA_MODEL = "fox-vision:latest"
 APP_PIN = os.environ.get("APP_PIN", "")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 OWNER_UUID = "a6fc9585-5882-4ed0-a9b7-343fd24f789a"
@@ -928,13 +928,15 @@ def chat_proxy():
     owner_uuid      = data.get("owner_uuid", "")
     conversation_id = conversation_ids.setdefault(speaker_key, str(uuid.uuid4()))
 
-    if data.get("image"):
-        return jsonify({"error": "Image input is not supported by the current model"}), 415
+    raw_image = (data.get("image") or "").strip()
+    if raw_image and "," in raw_image:
+        raw_image = raw_image.split(",", 1)[1]
+    image_b64 = raw_image or None
 
     # Hot cache for Ollama context window
     if speaker_key not in conversation_history:
         conversation_history[speaker_key] = []
-    conversation_history[speaker_key].append({"role": "user", "content": user_message})
+    conversation_history[speaker_key].append({"role": "user", "content": user_message})  # text-only — no base64 in history
     if len(conversation_history[speaker_key]) > MAX_HISTORY:
         conversation_history[speaker_key] = conversation_history[speaker_key][-MAX_HISTORY:]
 
@@ -946,6 +948,8 @@ def chat_proxy():
         system_prompt = system_prompt + f" Owner current status: {owner_status}."
 
     messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key]
+    if image_b64:
+        messages[-1] = {**messages[-1], "images": [image_b64]}
 
     if not OLLAMA_URL:
         return jsonify({"error": "OLLAMA_URL is not configured"}), 503
