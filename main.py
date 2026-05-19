@@ -444,7 +444,7 @@ HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Memory Bank</title>
+  <title>Fox Directives</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -453,6 +453,7 @@ HTML = """<!DOCTYPE html>
       --accent-dim: rgba(108,99,255,0.15); --text: #e8eaf0;
       --text-muted: #7a7f9a; --red: #ff5c72; --red-dim: rgba(255,92,114,0.12);
       --green: #3ecf8e; --radius: 12px; --shadow: 0 4px 24px rgba(0,0,0,0.4);
+      --cat-ethics: #ff9f43; --cat-character: #3ecf8e; --cat-meta: #6c63ff; --cat-family: #ff5c72;
     }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
     header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; justify-content: space-between; height: 64px; position: sticky; top: 0; z-index: 10; }
@@ -461,10 +462,12 @@ HTML = """<!DOCTYPE html>
     .count-badge { background: var(--accent-dim); color: var(--accent); font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 20px; border: 1px solid var(--accent); }
     .main { max-width: 800px; margin: 0 auto; padding: 32px 24px 80px; }
     .toolbar { display: flex; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; }
-    input, textarea { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 10px 14px; font-size: 14px; font-family: inherit; outline: none; transition: border-color 0.15s; }
-    input:focus, textarea:focus { border-color: var(--accent); }
+    input, textarea, select { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 10px 14px; font-size: 14px; font-family: inherit; outline: none; transition: border-color 0.15s; }
+    input:focus, textarea:focus, select:focus { border-color: var(--accent); }
     input::placeholder, textarea::placeholder { color: var(--text-muted); }
+    select option { background: var(--surface2); }
     .search-input { flex: 1; min-width: 180px; }
+    .cat-select { width: 160px; }
     button { cursor: pointer; border: none; border-radius: var(--radius); font-size: 14px; font-weight: 600; font-family: inherit; padding: 10px 18px; transition: background 0.15s; }
     .btn-primary { background: var(--accent); color: #fff; }
     .btn-primary:hover { background: var(--accent-hover); }
@@ -475,25 +478,32 @@ HTML = """<!DOCTYPE html>
     .btn-icon { padding: 6px 10px; font-size: 13px; }
     .new-card { background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius); padding: 20px; margin-bottom: 24px; display: none; flex-direction: column; gap: 12px; box-shadow: var(--shadow); }
     .new-card.open { display: flex; }
-    .new-card input, .new-card textarea { width: 100%; }
+    .new-card input, .new-card textarea, .new-card select { width: 100%; }
     .new-card textarea { resize: vertical; min-height: 90px; }
-    .form-row { display: flex; gap: 10px; flex-wrap: wrap; }
-    .form-row input { flex: 1; min-width: 140px; }
+    .form-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .form-row input, .form-row select { flex: 1; min-width: 120px; }
+    .priority-input { width: 80px !important; flex: 0 0 80px !important; }
     .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); font-weight: 600; margin-bottom: 12px; }
-    .memory-list { display: flex; flex-direction: column; gap: 12px; }
-    .memory-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; transition: border-color 0.15s, box-shadow 0.15s; }
-    .memory-card:hover { border-color: var(--accent); box-shadow: 0 2px 16px rgba(108,99,255,0.12); }
+    .directive-list { display: flex; flex-direction: column; gap: 12px; }
+    .directive-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; transition: border-color 0.15s, box-shadow 0.15s; }
+    .directive-card:hover { border-color: var(--accent); box-shadow: 0 2px 16px rgba(108,99,255,0.12); }
     .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
     .card-title { font-size: 15px; font-weight: 600; line-height: 1.4; }
     .card-actions { display: flex; gap: 6px; flex-shrink: 0; opacity: 0; transition: opacity 0.15s; }
-    .memory-card:hover .card-actions { opacity: 1; }
+    .directive-card:hover .card-actions { opacity: 1; }
     .card-content { font-size: 14px; color: var(--text-muted); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
     .card-footer { margin-top: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .tag { font-size: 11px; font-weight: 600; background: var(--accent-dim); color: var(--accent); padding: 2px 8px; border-radius: 20px; border: 1px solid var(--accent); cursor: pointer; }
+    .cat-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; border: 1px solid; cursor: pointer; }
+    .cat-badge.ethics   { background: rgba(255,159,67,0.15);  color: var(--cat-ethics);    border-color: var(--cat-ethics); }
+    .cat-badge.character{ background: rgba(62,207,142,0.15);  color: var(--cat-character); border-color: var(--cat-character); }
+    .cat-badge.meta     { background: rgba(108,99,255,0.15);  color: var(--cat-meta);      border-color: var(--cat-meta); }
+    .cat-badge.family   { background: rgba(255,92,114,0.15);  color: var(--cat-family);    border-color: var(--cat-family); }
+    .cat-badge.other    { background: var(--accent-dim);       color: var(--accent);        border-color: var(--accent); }
+    .priority-badge { font-size: 11px; font-weight: 600; color: var(--text-muted); background: var(--surface2); padding: 2px 8px; border-radius: 20px; border: 1px solid var(--border); }
     .card-meta { font-size: 11px; color: var(--text-muted); margin-left: auto; }
     .edit-form { display: none; flex-direction: column; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
     .edit-form.open { display: flex; }
-    .edit-form input, .edit-form textarea { width: 100%; }
+    .edit-form input, .edit-form textarea, .edit-form select { width: 100%; }
     .edit-form textarea { min-height: 80px; resize: vertical; }
     .empty-state { text-align: center; padding: 64px 24px; color: var(--text-muted); }
     .empty-state .icon { font-size: 48px; margin-bottom: 16px; }
@@ -505,120 +515,159 @@ HTML = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <div class="logo"><div class="logo-icon">🧠</div>Memory Bank</div>
-  <span class="count-badge" id="countBadge">0 memories</span>
+  <div class="logo"><div class="logo-icon">⚡</div>Fox Directives</div>
+  <span class="count-badge" id="countBadge">0 directives</span>
 </header>
 <div class="main">
   <div class="toolbar">
-    <input class="search-input" type="text" id="searchInput" placeholder="Search memories…" oninput="onSearch()" />
-    <input type="text" id="tagFilter" placeholder="Filter by tag…" style="width:140px" oninput="onSearch()" />
-    <button class="btn-primary" onclick="toggleNew()">+ New memory</button>
+    <input class="search-input" type="text" id="searchInput" placeholder="Search directives…" oninput="onSearch()" />
+    <select class="cat-select" id="catFilter" onchange="onSearch()">
+      <option value="">All categories</option>
+      <option value="ethics">ethics</option>
+      <option value="character">character</option>
+      <option value="meta">meta</option>
+      <option value="family">family</option>
+    </select>
+    <button class="btn-primary" onclick="toggleNew()">+ New directive</button>
   </div>
   <div class="new-card" id="newCard">
-    <input type="text" id="newTitle" placeholder="Title (optional)" />
-    <textarea id="newContent" placeholder="What do you want to remember? *"></textarea>
     <div class="form-row">
-      <input type="text" id="newTags" placeholder="Tags (comma-separated)" />
-      <button class="btn-primary" onclick="createMemory()">Save memory</button>
+      <select id="newCategory">
+        <option value="">Category *</option>
+        <option value="ethics">ethics</option>
+        <option value="character">character</option>
+        <option value="meta">meta</option>
+        <option value="family">family</option>
+      </select>
+      <input type="text" id="newTitle" placeholder="Title *" style="flex:2" />
+      <input class="priority-input" type="number" id="newPriority" placeholder="Priority" min="1" max="10" value="9" />
+    </div>
+    <textarea id="newContent" placeholder="Directive content *"></textarea>
+    <div class="form-row">
+      <button class="btn-primary" onclick="createDirective()">Save directive</button>
       <button class="btn-ghost" onclick="toggleNew()">Cancel</button>
     </div>
   </div>
   <div class="section-label" id="listLabel"></div>
-  <div class="memory-list" id="memoryList">
+  <div class="directive-list" id="directiveList">
     <div class="empty-state"><div class="icon">⏳</div><p>Loading…</p></div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
 <script>
+  const OWNER_UUID = 'a6fc9585-5882-4ed0-a9b7-343fd24f789a';
   let all = [];
   async function load() {
     try {
-      const r = await fetch('/memories');
+      const r = await fetch(`/directives?owner_uuid=${OWNER_UUID}`);
       const d = await r.json();
-      all = d.memories || [];
+      all = d.directives || [];
       render(all);
     } catch { toast('Failed to load', 'error'); }
   }
   function onSearch() {
     const q = document.getElementById('searchInput').value.toLowerCase();
-    const tag = document.getElementById('tagFilter').value.trim().toLowerCase();
+    const cat = document.getElementById('catFilter').value;
     let f = all;
-    if (q) f = f.filter(m => (m.title||'').toLowerCase().includes(q) || m.content.toLowerCase().includes(q));
-    if (tag) f = f.filter(m => (m.tags||[]).some(t => t.toLowerCase().includes(tag)));
+    if (q) f = f.filter(d => (d.title||'').toLowerCase().includes(q) || d.content.toLowerCase().includes(q));
+    if (cat) f = f.filter(d => d.category === cat);
     render(f);
   }
   function render(list) {
-    const el = document.getElementById('memoryList');
+    const el = document.getElementById('directiveList');
     const badge = document.getElementById('countBadge');
     const label = document.getElementById('listLabel');
-    badge.textContent = all.length === 1 ? '1 memory' : `${all.length} memories`;
-    label.textContent = list.length !== all.length ? `Showing ${list.length} of ${all.length}` : (all.length ? 'All memories' : '');
+    badge.textContent = all.length === 1 ? '1 directive' : `${all.length} directives`;
+    label.textContent = list.length !== all.length ? `Showing ${list.length} of ${all.length}` : (all.length ? 'All directives' : '');
     if (!list.length) {
-      el.innerHTML = `<div class="empty-state"><div class="icon">${!all.length ? '🧠' : '🔍'}</div><p>${!all.length ? 'No memories yet.' : 'No memories match your search.'}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><div class="icon">${!all.length ? '⚡' : '🔍'}</div><p>${!all.length ? 'No directives yet.' : 'No directives match your search.'}</p></div>`;
       return;
     }
-    el.innerHTML = list.map(m => `
-      <div class="memory-card">
+    el.innerHTML = list.map(d => {
+      const catClass = ['ethics','character','meta','family'].includes(d.category) ? d.category : 'other';
+      return `
+      <div class="directive-card">
         <div class="card-header">
-          <div class="card-title">${esc(m.title || m.content.slice(0,60))}</div>
+          <div class="card-title">${esc(d.title || d.content.slice(0,60))}</div>
           <div class="card-actions">
-            <button class="btn-ghost btn-icon" onclick="toggleEdit('${m.id}')">✏️ Edit</button>
-            <button class="btn-danger btn-icon" onclick="del('${m.id}')">🗑️</button>
+            <button class="btn-ghost btn-icon" onclick="toggleEdit('${d.id}')">✏️ Edit</button>
+            <button class="btn-danger btn-icon" onclick="del('${d.id}')">🗑️</button>
           </div>
         </div>
-        ${m.title ? `<div class="card-content">${esc(m.content)}</div>` : ''}
+        ${d.title ? `<div class="card-content">${esc(d.content)}</div>` : ''}
         <div class="card-footer">
-          ${(m.tags||[]).map(t=>`<span class="tag" onclick="filterTag('${esc(t)}')">${esc(t)}</span>`).join('')}
-          <span class="card-meta">${ago(m.updated_at)}</span>
+          <span class="cat-badge ${catClass}" onclick="filterCategory('${esc(d.category)}')">${esc(d.category)}</span>
+          <span class="priority-badge">p${d.priority}</span>
+          <span class="card-meta">${ago(d.updated_at)}</span>
         </div>
-        <div class="edit-form" id="edit-${m.id}">
-          <input type="text" id="et-${m.id}" value="${esc(m.title||'')}" placeholder="Title (optional)" />
-          <textarea id="ec-${m.id}">${esc(m.content)}</textarea>
+        <div class="edit-form" id="edit-${d.id}">
           <div class="form-row">
-            <input type="text" id="eg-${m.id}" value="${esc((m.tags||[]).join(', '))}" placeholder="Tags" />
-            <button class="btn-primary btn-icon" onclick="saveEdit('${m.id}')">Save</button>
-            <button class="btn-ghost btn-icon" onclick="toggleEdit('${m.id}')">Cancel</button>
+            <select id="ecat-${d.id}">
+              <option value="ethics"${d.category==='ethics'?' selected':''}>ethics</option>
+              <option value="character"${d.category==='character'?' selected':''}>character</option>
+              <option value="meta"${d.category==='meta'?' selected':''}>meta</option>
+              <option value="family"${d.category==='family'?' selected':''}>family</option>
+            </select>
+            <input type="text" id="et-${d.id}" value="${esc(d.title||'')}" placeholder="Title" style="flex:2" />
+            <input class="priority-input" type="number" id="ep-${d.id}" value="${d.priority}" min="1" max="10" />
+          </div>
+          <textarea id="ec-${d.id}">${esc(d.content)}</textarea>
+          <div class="form-row">
+            <button class="btn-primary btn-icon" onclick="saveEdit('${d.id}')">Save</button>
+            <button class="btn-ghost btn-icon" onclick="toggleEdit('${d.id}')">Cancel</button>
           </div>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }
   function toggleNew() {
     const c = document.getElementById('newCard');
     c.classList.toggle('open');
-    if (c.classList.contains('open')) document.getElementById('newContent').focus();
-    else { ['newTitle','newContent','newTags'].forEach(id => document.getElementById(id).value=''); }
+    if (c.classList.contains('open')) document.getElementById('newTitle').focus();
+    else {
+      document.getElementById('newCategory').value = '';
+      document.getElementById('newTitle').value = '';
+      document.getElementById('newContent').value = '';
+      document.getElementById('newPriority').value = '9';
+    }
   }
-  async function createMemory() {
-    const title = document.getElementById('newTitle').value.trim();
-    const content = document.getElementById('newContent').value.trim();
-    const tags = document.getElementById('newTags').value.split(',').map(t=>t.trim()).filter(Boolean);
-    if (!content) { toast('Content is required','error'); return; }
+  async function createDirective() {
+    const category = document.getElementById('newCategory').value.trim();
+    const title    = document.getElementById('newTitle').value.trim();
+    const content  = document.getElementById('newContent').value.trim();
+    const priority = parseInt(document.getElementById('newPriority').value, 10) || 9;
+    if (!category) { toast('Category is required', 'error'); return; }
+    if (!title)    { toast('Title is required', 'error'); return; }
+    if (!content)  { toast('Content is required', 'error'); return; }
     try {
-      const r = await fetch('/memories', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title:title||undefined, content, tags}) });
+      const r = await fetch('/directives', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({owner_uuid: OWNER_UUID, category, title, content, priority}) });
       if (!r.ok) throw new Error();
-      toggleNew(); await load(); toast('Memory saved','success');
-    } catch { toast('Failed to save','error'); }
+      toggleNew(); await load(); toast('Directive saved', 'success');
+    } catch { toast('Failed to save', 'error'); }
   }
   function toggleEdit(id) { document.getElementById(`edit-${id}`).classList.toggle('open'); }
   async function saveEdit(id) {
-    const title = document.getElementById(`et-${id}`).value.trim();
-    const content = document.getElementById(`ec-${id}`).value.trim();
-    const tags = document.getElementById(`eg-${id}`).value.split(',').map(t=>t.trim()).filter(Boolean);
-    if (!content) { toast('Content cannot be empty','error'); return; }
+    const category = document.getElementById(`ecat-${id}`).value.trim();
+    const title    = document.getElementById(`et-${id}`).value.trim();
+    const content  = document.getElementById(`ec-${id}`).value.trim();
+    const priority = parseInt(document.getElementById(`ep-${id}`).value, 10);
+    if (!content) { toast('Content cannot be empty', 'error'); return; }
     try {
-      const r = await fetch(`/memories/${id}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title:title||null, content, tags}) });
+      const r = await fetch(`/directives/${id}`, { method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({category, title: title||null, content, priority}) });
       if (!r.ok) throw new Error();
-      await load(); toast('Updated','success');
-    } catch { toast('Failed to update','error'); }
+      await load(); toast('Updated', 'success');
+    } catch { toast('Failed to update', 'error'); }
   }
   async function del(id) {
-    if (!confirm('Delete this memory?')) return;
+    if (!confirm('Delete this directive?')) return;
     try {
-      await fetch(`/memories/${id}`, { method:'DELETE' });
+      await fetch(`/directives/${id}`, { method:'DELETE' });
       await load(); toast('Deleted');
-    } catch { toast('Failed to delete','error'); }
+    } catch { toast('Failed to delete', 'error'); }
   }
-  function filterTag(tag) { document.getElementById('tagFilter').value=tag; onSearch(); }
+  function filterCategory(cat) { document.getElementById('catFilter').value = cat; onSearch(); }
   function ago(iso) {
     if (!iso) return '';
     const d = Math.floor((Date.now()-new Date(iso))/1000);
