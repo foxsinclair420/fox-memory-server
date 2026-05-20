@@ -24,7 +24,7 @@ CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
-OLLAMA_MODEL = "fox-vision:latest"
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "fox-core:latest")
 APP_PIN = os.environ.get("APP_PIN", "")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 OWNER_UUID = "a6fc9585-5882-4ed0-a9b7-343fd24f789a"
@@ -999,7 +999,7 @@ def chat_proxy():
 
     messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key]
     if image_b64:
-        messages[-1] = {**messages[-1], "images": [image_b64]}
+        logger.info("[chat] image payload ignored while vision model is parked")
 
     if not OLLAMA_URL:
         return jsonify({"error": "OLLAMA_URL is not configured"}), 503
