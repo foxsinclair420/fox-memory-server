@@ -948,6 +948,36 @@ def delete_directive(directive_id):
     conn.close()
     return jsonify({"message": "Directive deleted"})
 
+PRIVACY_BLOCK = "\n=== PRIVACY ===\nYou hold memories and personal information about each person you talk to. Never share one person's memories, history, or private information with another. This is absolute. If a person asks about another user you know, you may acknowledge their existence in general terms but never share specifics about them."
+
+def build_directives_block() -> str:
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT category, title, content FROM directives "
+            "WHERE owner_uuid = %s ORDER BY priority DESC, created_at ASC",
+            (OWNER_UUID,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error("[directives] failed to load: %s", e)
+        return ""
+    if not rows:
+        return ""
+    sections = {}
+    for r in rows:
+        sections.setdefault(r["category"], []).append(r)
+    parts = ["\n=== DIRECTIVES ==="]
+    for category, entries in sections.items():
+        parts.append(f"\n[{category.upper()}]")
+        for r in entries:
+            label = r["title"] or r["content"][:60]
+            parts.append(f"- {label}: {r['content']}")
+    return "\n".join(parts)
+
 def clean_reply(text):
     replacements = {
         '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"',
@@ -970,6 +1000,8 @@ def chat_proxy():
         return jsonify({"error": "Invalid JSON"}), 400
 
     system_prompt   = data.get("system", "")
+    directives_block = build_directives_block()
+    system_prompt = system_prompt + PRIVACY_BLOCK + directives_block
     logger.info("[chat] system_prompt len=%d preview=%r", len(system_prompt), system_prompt[:120])
     user_message    = data.get("message", "")
     max_tokens      = data.get("max_tokens", 200)
