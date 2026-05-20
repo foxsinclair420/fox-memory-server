@@ -25,6 +25,7 @@ CORS(app)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "fox-core:latest")
+OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "huihui_ai/qwen2.5-vl-abliterated:7b")
 APP_PIN = os.environ.get("APP_PIN", "")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 OWNER_UUID = "a6fc9585-5882-4ed0-a9b7-343fd24f789a"
@@ -999,16 +1000,42 @@ def chat_proxy():
 
     messages = [{"role": "system", "content": system_prompt}] + conversation_history[speaker_key]
     if image_b64:
-        logger.info("[chat] image payload ignored while vision model is parked")
+        logger.info("[chat] vision invoked for speaker=%s", speaker_key)
+        vision_description = "[Image description: unable to describe image]"
+        try:
+            t0 = time.time()
+            vis_resp = http_requests.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={
+                    "model": OLLAMA_VISION_MODEL,
+                    "stream": False,
+                    "keep_alive": "24h",
+                    "messages": [{
+                        "role": "user",
+                        "content": "Describe this image in detail. Focus on what's visible: objects, people, text, colors, mood, context. Be specific and factual.",
+                        "images": [image_b64],
+                    }],
+                },
+                timeout=60,
+            )
+            vis_resp.raise_for_status()
+            desc = vis_resp.json()["message"]["content"].strip()
+            vision_description = f"[Image description: {desc}]"
+            logger.info("[vision] %.2fs — %r", time.time() - t0, desc[:200])
+        except Exception as vis_err:
+            logger.error("[vision] call failed: %s", vis_err)
+        messages.insert(-1, {"role": "user", "content": vision_description})
 
     if not OLLAMA_URL:
         return jsonify({"error": "OLLAMA_URL is not configured"}), 503
     try:
+        t1 = time.time()
         ol_resp = http_requests.post(
             f"{OLLAMA_URL}/api/chat",
             json={
                 "model": OLLAMA_MODEL,
                 "stream": False,
+                "keep_alive": "24h",
                 "options": {"num_predict": max_tokens},
                 "messages": messages,
             },
@@ -1016,6 +1043,7 @@ def chat_proxy():
         )
         ol_resp.raise_for_status()
         reply = clean_reply(ol_resp.json()["message"]["content"])
+        logger.info("[fox-core] %.2fs", time.time() - t1)
         if "<think>" in reply:
             reply = reply.split("</think>")[-1].strip()
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
