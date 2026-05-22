@@ -1,4 +1,5 @@
 import json
+import re
 import logging
 import os
 import queue
@@ -26,6 +27,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "fox-core:latest")
 OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "huihui_ai/qwen2.5-vl-abliterated:7b")
+BRAVE_SEARCH_API_KEY = os.environ.get("BRAVE_SEARCH_API_KEY", "")
 APP_PIN = os.environ.get("APP_PIN", "")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 OWNER_UUID = "a6fc9585-5882-4ed0-a9b7-343fd24f789a"
@@ -978,6 +980,45 @@ def build_directives_block() -> str:
             parts.append(f"- {label}: {r['content']}")
     return "\n".join(parts)
 
+SEARCH_INTENT_RE = re.compile(
+    r"\b(search|look up|google|find|what'?s the latest|latest on|news (about|on)|today'?s|current|right now)\b"
+    r"|\bweather\b"
+    r"|\b(who won|score of|results of)\b",
+    re.IGNORECASE,
+)
+
+SEARCH_CURIOSITY_DIRECTIVE = (
+    "\n\nYou have access to web search. If you genuinely want to look something up — "
+    "to verify a fact, get current info, satisfy your own curiosity, or because something feels "
+    "worth checking — respond with:\n\n<search>your query here</search>\n\non its own line, then stop. "
+    "The system will search and reply back with results, after which you can respond to the user. "
+    "Use this naturally and sparingly. Don't search every message. Search when you'd want to know more."
+)
+
+def _brave_search(query: str, count: int = 5) -> str:
+    if not BRAVE_SEARCH_API_KEY:
+        logger.warning("[search] BRAVE_SEARCH_API_KEY not set")
+        return "No results found."
+    try:
+        resp = http_requests.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            headers={"X-Subscription-Token": BRAVE_SEARCH_API_KEY, "Accept": "application/json"},
+            params={"q": query, "count": count, "safesearch": "moderate"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("web", {}).get("results", [])
+        logger.info("[search] query=%r results=%d", query, len(results))
+        if not results:
+            return "No results found."
+        lines = []
+        for i, r in enumerate(results, 1):
+            lines.append(f"[{i}] {r.get('title','')} — {r.get('description','')} ({r.get('url','')})")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("[search] failed: %s", e)
+        return "No results found."
+
 def clean_reply(text):
     replacements = {
         '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"',
@@ -991,6 +1032,14 @@ def clean_reply(text):
     text = text.encode('ascii', 'ignore').decode('ascii')
     return text.strip()
 
+@app.route("/search", methods=["POST"])
+def search_endpoint():
+    data = request.get_json(silent=True)
+    if not data or not (data.get("query") or "").strip():
+        return jsonify({"error": "query is required"}), 400
+    results = _brave_search(data["query"].strip())
+    return jsonify({"results": results})
+
 @app.route("/chat", methods=["POST"])
 def chat_proxy():
     _ensure_summarize_worker()
@@ -1001,7 +1050,7 @@ def chat_proxy():
 
     system_prompt   = data.get("system", "")
     directives_block = build_directives_block()
-    system_prompt = system_prompt + PRIVACY_BLOCK + directives_block
+    system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + SEARCH_CURIOSITY_DIRECTIVE
     logger.info("[chat] system_prompt len=%d preview=%r", len(system_prompt), system_prompt[:120])
     user_message    = data.get("message", "")
     max_tokens      = data.get("max_tokens", 200)
@@ -1058,6 +1107,15 @@ def chat_proxy():
             logger.error("[vision] call failed: %s", vis_err)
         messages.insert(-1, {"role": "user", "content": vision_description})
 
+    # User-triggered search
+    if SEARCH_INTENT_RE.search(user_message):
+        logger.info("[search] user-triggered for speaker=%s", speaker_key)
+        search_results = _brave_search(user_message)
+        messages.insert(-1, {
+            "role": "system",
+            "content": f"Web search results for the user's query:\n{search_results}\n\nUse these to inform your reply if relevant.",
+        })
+
     if not OLLAMA_URL:
         return jsonify({"error": "OLLAMA_URL is not configured"}), 503
     try:
@@ -1078,6 +1136,33 @@ def chat_proxy():
         logger.info("[fox-core] %.2fs", time.time() - t1)
         if "<think>" in reply:
             reply = reply.split("</think>")[-1].strip()
+        # Fox-triggered search (one round, no recursion)
+        fox_search = re.search(r"<search>(.*?)</search>", reply, re.IGNORECASE | re.DOTALL)
+        if fox_search:
+            search_query = fox_search.group(1).strip()
+            stripped_reply = re.sub(r"<search>.*?</search>", "", reply, flags=re.IGNORECASE | re.DOTALL).strip()
+            logger.info("[search] fox-triggered query=%r", search_query)
+            search_results = _brave_search(search_query)
+            followup_messages = messages + [
+                {"role": "assistant", "content": stripped_reply},
+                {"role": "system", "content": f"Web search results:\n{search_results}\n\nNow give your final response to the user."},
+            ]
+            try:
+                t2 = time.time()
+                ol2 = http_requests.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={"model": OLLAMA_MODEL, "stream": False, "keep_alive": "24h",
+                          "options": {"num_predict": max_tokens}, "messages": followup_messages},
+                    timeout=60,
+                )
+                ol2.raise_for_status()
+                reply = clean_reply(ol2.json()["message"]["content"])
+                logger.info("[fox-core/search-followup] %.2fs", time.time() - t2)
+                if "<think>" in reply:
+                    reply = reply.split("</think>")[-1].strip()
+            except Exception as followup_err:
+                logger.error("[search] fox followup failed: %s", followup_err)
+                reply = stripped_reply or "Hmm, let me think on that without the search."
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
 
         # Persist both turns to the canonical store
