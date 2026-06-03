@@ -4,6 +4,7 @@ Run once from the repo root.
 """
 
 import os
+import uuid
 import psycopg2
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -189,9 +190,9 @@ def main():
     for i, d in enumerate(DIRECTIVES, 1):
         try:
             cur.execute(
-                "INSERT INTO directives (owner_uuid, category, title, content, priority) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (d["owner_uuid"], d["category"], d["title"], d["content"], d["priority"]),
+                "INSERT INTO directives (id, owner_uuid, category, title, content, priority) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (str(uuid.uuid4()), d["owner_uuid"], d["category"], d["title"], d["content"], d["priority"]),
             )
             print(f"  [{i}/{len(DIRECTIVES)}] OK  {d['title']}")
             success += 1
