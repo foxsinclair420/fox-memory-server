@@ -772,6 +772,53 @@ def list_turns():
     return jsonify({"count": len(rows), "turns": rows})
 
 
+# ─── VISITORS ─────────────────────────────────────────────────────────────────
+
+@app.route("/visitors", methods=["GET"])
+@require_auth
+def get_visitors():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT speaker_uuid, COUNT(*) AS message_count, MAX(created_at) AS last_seen "
+        "FROM conversation_turns WHERE owner_uuid = %s AND speaker_uuid != %s "
+        "GROUP BY speaker_uuid ORDER BY last_seen DESC",
+        (OWNER_UUID, OWNER_UUID),
+    )
+    visitors = [dict(r) for r in cur.fetchall()]
+    if not visitors:
+        cur.close()
+        conn.close()
+        return jsonify({"visitors": []})
+    speaker_uuids = [v["speaker_uuid"] for v in visitors]
+    cur.execute(
+        "SELECT id, conversation_id, speaker_uuid, role, content, created_at "
+        "FROM ("
+        "  SELECT id, conversation_id, speaker_uuid, role, content, created_at, "
+        "         ROW_NUMBER() OVER (PARTITION BY speaker_uuid ORDER BY created_at DESC) AS rn "
+        "  FROM conversation_turns "
+        "  WHERE owner_uuid = %s AND speaker_uuid = ANY(%s)"
+        ") sub WHERE rn <= 10 ORDER BY speaker_uuid, created_at DESC",
+        (OWNER_UUID, speaker_uuids),
+    )
+    recent_turns = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    turns_by_speaker = {}
+    for turn in recent_turns:
+        turns_by_speaker.setdefault(turn["speaker_uuid"], []).append(turn)
+    result = [
+        {
+            "speaker_uuid": v["speaker_uuid"],
+            "message_count": v["message_count"],
+            "last_seen": v["last_seen"],
+            "recent_messages": turns_by_speaker.get(v["speaker_uuid"], []),
+        }
+        for v in visitors
+    ]
+    return jsonify({"visitors": result})
+
+
 # ─── SUMMARIES ────────────────────────────────────────────────────────────────
 
 @app.route("/summaries", methods=["GET"])
