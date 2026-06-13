@@ -1027,6 +1027,28 @@ def build_directives_block() -> str:
             parts.append(f"- {label}: {r['content']}")
     return "\n".join(parts)
 
+def build_memory_block(speaker_key: str) -> str:
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT content, created_at FROM summaries "
+            "WHERE speaker_uuid = %s ORDER BY created_at DESC LIMIT 5",
+            (speaker_key,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error("[memory] failed to load summaries: %s", e)
+        return ""
+    if not rows:
+        return ""
+    parts = ["\n=== MEMORY ==="]
+    for r in rows:
+        parts.append(f"- {r['content']}")
+    return "\n".join(parts)
+
 SEARCH_INTENT_RE = re.compile(
     r"\b(search|look up|google|find|what'?s the latest|latest on|news (about|on)|today'?s|current|right now)\b"
     r"|\bweather\b"
@@ -1096,12 +1118,12 @@ def chat_proxy():
         return jsonify({"error": "Invalid JSON"}), 400
 
     system_prompt   = data.get("system", "")
+    speaker_key     = data.get("speaker_key", "unknown")
     directives_block = build_directives_block()
-    system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + SEARCH_CURIOSITY_DIRECTIVE
+    system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + build_memory_block(speaker_key) + SEARCH_CURIOSITY_DIRECTIVE
     logger.info("[chat] system_prompt len=%d preview=%r", len(system_prompt), system_prompt[:120])
     user_message    = data.get("message", "")
     max_tokens      = data.get("max_tokens", 200)
-    speaker_key     = data.get("speaker_key", "unknown")
     speaker_name    = data.get("speaker_name", speaker_key)
     is_owner        = data.get("is_owner", False)
     owner_uuid      = data.get("owner_uuid", "")
