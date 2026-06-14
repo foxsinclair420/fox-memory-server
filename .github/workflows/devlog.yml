@@ -1,0 +1,27 @@
+name: Fox Dev Log
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  devlog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+
+      - name: Send dev log to Fox
+        run: |
+          FILES=$(git diff --name-only HEAD~1 HEAD | jq -R . | jq -s .)
+          curl -X POST https://fox-memory-server.onrender.com/devlog \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"fox-memory-server\",
+              \"commit_sha\": \"${{ github.sha }}\",
+              \"commit_message\": \"${{ github.event.head_commit.message }}\",
+              \"files_changed\": $FILES,
+              \"author\": \"${{ github.event.head_commit.author.name }}\",
+              \"timestamp\": \"${{ github.event.head_commit.timestamp }}\"
+            }"
