@@ -30,6 +30,7 @@ OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "huihui_ai/qwen2.5-v
 BRAVE_SEARCH_API_KEY = os.environ.get("BRAVE_SEARCH_API_KEY", "")
 APP_PIN = os.environ.get("APP_PIN", "")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 OWNER_UUID = "a6fc9585-5882-4ed0-a9b7-343fd24f789a"
 
 conversation_history = {}
@@ -1360,6 +1361,60 @@ def update_profile():
         conn.close()
         return jsonify({"profile": profile}), 200
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/devlog", methods=["POST"])
+def devlog():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+    repo           = data.get("repo", "")
+    commit_sha     = data.get("commit_sha", "")
+    commit_message = data.get("commit_message", "")
+    files_changed  = data.get("files_changed", [])
+    author         = data.get("author", "")
+    timestamp      = data.get("timestamp", "")
+    if not OLLAMA_URL:
+        return jsonify({"error": "OLLAMA_URL is not configured"}), 503
+    if not DISCORD_WEBHOOK_URL:
+        return jsonify({"error": "DISCORD_WEBHOOK_URL is not configured"}), 503
+    system_prompt = (
+        "You are Fox, the voice of Sinclair Studios. Write a short dev log entry in first person, "
+        "narrative studio voice — like a journal entry from the shop floor. Be warm, direct, a little "
+        "wry. End every entry with exactly this line: Still building. Still stubborn. Still hand-made. — Sinclair Studios"
+    )
+    user_message = (
+        f"Repo: {repo}\n"
+        f"Commit: {commit_sha}\n"
+        f"Message: {commit_message}\n"
+        f"Author: {author}\n"
+        f"Timestamp: {timestamp}\n"
+        f"Files changed:\n" + "\n".join(f"  - {f}" for f in files_changed)
+    )
+    try:
+        ollama_resp = http_requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_message},
+                ],
+            },
+            timeout=30,
+        )
+        ollama_resp.raise_for_status()
+        entry = ollama_resp.json()["message"]["content"].strip()
+        discord_resp = http_requests.post(
+            DISCORD_WEBHOOK_URL,
+            json={"content": entry},
+            timeout=10,
+        )
+        discord_resp.raise_for_status()
+        return jsonify({"entry": entry}), 200
+    except Exception as e:
+        logger.error("[devlog] failed: %s", e)
         return jsonify({"error": str(e)}), 500
 
 @app.errorhandler(404)
