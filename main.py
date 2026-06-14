@@ -1234,23 +1234,6 @@ def chat_proxy():
                 reply = stripped_reply or "Hmm, let me think on that without the search."
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
 
-        # Persist both turns to the canonical store
-        now = datetime.utcnow().isoformat() + "Z"
-        try:
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO conversation_turns (id, conversation_id, speaker_uuid, owner_uuid, role, content, created_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s), (%s,%s,%s,%s,%s,%s,%s)",
-                (str(uuid.uuid4()), conversation_id, speaker_key, owner_uuid, "user", user_message, now,
-                 str(uuid.uuid4()), conversation_id, speaker_key, owner_uuid, "fox",  reply,        now),
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception as db_err:
-            logger.error("[chat] turn write failed: %s", db_err)
-
         # Enqueue summarization after every SUMMARIZE_EVERY turns
         summarization_counters[speaker_key] = summarization_counters.get(speaker_key, 0) + 1
         if summarization_counters[speaker_key] >= SUMMARIZE_EVERY:
