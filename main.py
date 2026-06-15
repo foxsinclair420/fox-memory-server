@@ -1233,6 +1233,16 @@ def chat_proxy():
             except Exception as followup_err:
                 logger.error("[search] fox followup failed: %s", followup_err)
                 reply = stripped_reply or "Hmm, let me think on that without the search."
+        if is_owner:
+            devlog_match = re.search(r"<devlog>(.*?)</devlog>", reply, re.IGNORECASE | re.DOTALL)
+            if devlog_match:
+                devlog_content = devlog_match.group(1).strip()
+                reply = re.sub(r"<devlog>.*?</devlog>", "", reply, flags=re.IGNORECASE | re.DOTALL).strip()
+                logger.info("[devlog] fox-triggered, posting to Discord")
+                try:
+                    http_requests.post(DISCORD_WEBHOOK_URL, json={"content": devlog_content}, timeout=10)
+                except Exception as devlog_err:
+                    logger.error("[devlog] post failed: %s", devlog_err)
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
 
         # Enqueue summarization after every SUMMARIZE_EVERY turns
