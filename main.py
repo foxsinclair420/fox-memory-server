@@ -1028,7 +1028,7 @@ def build_directives_block() -> str:
             parts.append(f"- {label}: {r['content']}")
     return "\n".join(parts)
 
-def build_memory_block(speaker_key: str) -> str:
+def build_memory_block(speaker_key: str, speaker_name: str = "them") -> str:
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -1038,14 +1038,35 @@ def build_memory_block(speaker_key: str) -> str:
             (speaker_key,),
         )
         rows = cur.fetchall()
+        cur.execute(
+            "SELECT created_at FROM conversation_turns "
+            "WHERE speaker_uuid = %s ORDER BY created_at DESC LIMIT 1",
+            (speaker_key,),
+        )
+        last_turn = cur.fetchone()
         cur.close()
         conn.close()
     except Exception as e:
         logger.error("[memory] failed to load summaries: %s", e)
         return ""
+    parts = []
+    if last_turn:
+        try:
+            last_dt = datetime.fromisoformat(last_turn["created_at"].replace("Z", ""))
+            delta = datetime.utcnow() - last_dt
+            secs = int(delta.total_seconds())
+            if secs < 3600:
+                ago = f"{secs // 60}m ago"
+            elif secs < 86400:
+                ago = f"{secs // 3600}h ago"
+            else:
+                ago = f"{secs // 86400}d ago"
+            parts.append(f"\nLast time {speaker_name} was here: {ago}.")
+        except Exception:
+            pass
     if not rows:
-        return ""
-    parts = ["\n=== MEMORY ==="]
+        return "\n".join(parts)
+    parts.append("\n=== MEMORY ===")
     for r in rows:
         parts.append(f"- {r['content']}")
     return "\n".join(parts)
@@ -1121,11 +1142,11 @@ def chat_proxy():
     system_prompt   = data.get("system", "")
     speaker_key     = data.get("speaker_key", "unknown")
     directives_block = build_directives_block()
-    system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + build_memory_block(speaker_key) + SEARCH_CURIOSITY_DIRECTIVE
+    speaker_name    = data.get("speaker_name", speaker_key)
+    system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + build_memory_block(speaker_key, speaker_name) + SEARCH_CURIOSITY_DIRECTIVE
     logger.info("[chat] system_prompt len=%d preview=%r", len(system_prompt), system_prompt[:120])
     user_message    = data.get("message", "")
     max_tokens      = data.get("max_tokens", 200)
-    speaker_name    = data.get("speaker_name", speaker_key)
     is_owner        = data.get("is_owner", False)
     owner_uuid      = data.get("owner_uuid", "")
     conversation_id = conversation_ids.setdefault(speaker_key, str(uuid.uuid4()))
