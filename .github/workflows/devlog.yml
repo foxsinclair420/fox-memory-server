@@ -12,6 +12,13 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Warm up Ollama
+        run: |
+          curl -s -X POST https://dz6xtb7wg9gk8r-11434.proxy.runpod.net/api/chat \
+            -H "Content-Type: application/json" \
+            -d '{"model":"fox-tuned-v4","messages":[{"role":"user","content":"hi"}],"stream":false,"keep_alive":"24h"}' \
+            --max-time 60 || true
+
       - name: Send dev log to Fox
         run: |
           FILES=$(git diff --name-only HEAD~1 HEAD | jq -R . | jq -s .)
