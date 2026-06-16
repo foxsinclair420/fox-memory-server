@@ -1493,7 +1493,7 @@ def devlog():
                     {"role": "user",   "content": user_message},
                 ],
             },
-            timeout=30,
+            timeout=120,
         )
         ollama_resp.raise_for_status()
         entry = ollama_resp.json()["message"]["content"].strip()
