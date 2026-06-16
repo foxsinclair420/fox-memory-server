@@ -1131,6 +1131,40 @@ def search_endpoint():
     results = _brave_search(data["query"].strip())
     return jsonify({"results": results})
 
+def check_memory_retrieval(message: str) -> dict:
+    """Ask fox-memory whether this message warrants retrieving past memories."""
+    system_prompt = (
+        "You are a memory retrieval filter for Fox, an AI companion. Your only job is to read an incoming message and decide whether retrieving past memories would meaningfully help Fox respond.\n\n"
+        "Respond in JSON only. No explanation, no preamble.\n\n"
+        "If retrieval is NOT needed:\n{\"retrieve\": false}\n\n"
+        "If retrieval IS needed:\n{\"retrieve\": true, \"query\": \"<short search query describing what to look for>\"}\n\n"
+        "Retrieval is needed when the message references the past, mentions something previously discussed, or contains emotional context that past memories would help Fox address with continuity.\n\n"
+        "Retrieval is NOT needed for greetings, small talk, simple questions, or anything that stands on its own without history."
+    )
+
+    try:
+        response = http_requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": "fox-memory:latest",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": message}
+                ],
+                "stream": False,
+                "options": {"temperature": 0.1}
+            },
+            timeout=10
+        )
+        result = response.json()
+        content = result.get("message", {}).get("content", "").strip()
+        parsed = json.loads(content)
+        return parsed
+    except Exception as e:
+        print(f"[fox-memory] retrieval check failed: {e}")
+        return {"retrieve": False}
+
+
 @app.route("/chat", methods=["POST"])
 def chat_proxy():
     _ensure_summarize_worker()
@@ -1146,6 +1180,27 @@ def chat_proxy():
     system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + build_memory_block(speaker_key, speaker_name) + SEARCH_CURIOSITY_DIRECTIVE
     logger.info("[chat] system_prompt len=%d preview=%r", len(system_prompt), system_prompt[:120])
     user_message    = data.get("message", "")
+    # fox-memory: mid-conversation retrieval check
+    retrieval = check_memory_retrieval(user_message)
+    if retrieval.get("retrieve") and retrieval.get("query"):
+        query = retrieval["query"]
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT content FROM summaries WHERE speaker_uuid = %s AND content ILIKE %s "
+                "ORDER BY created_at DESC LIMIT 3",
+                (speaker_key, f"%{query}%"),
+            )
+            retrieved_rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            if retrieved_rows:
+                retrieved = "\n".join(r["content"] for r in retrieved_rows)
+                system_prompt += f"\n\n[Retrieved memory — relevant to this message]\n{retrieved}"
+                logger.info("[fox-memory] retrieval injected for query=%r", query)
+        except Exception as e:
+            logger.warning("[fox-memory] retrieval query failed: %s", e)
     max_tokens      = data.get("max_tokens", 200)
     is_owner        = data.get("is_owner", False)
     owner_uuid      = data.get("owner_uuid", "")
