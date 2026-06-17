@@ -36,6 +36,7 @@ OWNER_UUID = "a6fc9585-5882-4ed0-a9b7-343fd24f789a"
 conversation_history = {}
 MAX_HISTORY = 6
 conversation_ids = {}  # speaker_key -> current conversation_id (session-scoped, resets on restart)
+_last_consolidation = {}
 
 CURRENT_PROMPT_VERSION = 1
 
@@ -414,6 +415,18 @@ def init_db():
         )
     """)
     cur.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS emotion_tag TEXT")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS consolidated_summaries (
+            id                  TEXT PRIMARY KEY,
+            speaker_uuid        TEXT NOT NULL,
+            content             TEXT NOT NULL,
+            source_summary_ids  TEXT NOT NULL,
+            emotion_tag         TEXT,
+            created_at          TEXT NOT NULL,
+            updated_at          TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_consolidated_speaker ON consolidated_summaries(speaker_uuid)")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS directives (
             id          TEXT PRIMARY KEY,
@@ -1047,11 +1060,18 @@ def build_memory_block(speaker_key: str, speaker_name: str = "them") -> str:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "SELECT content, created_at FROM summaries "
+            "SELECT content, created_at FROM consolidated_summaries "
             "WHERE speaker_uuid = %s ORDER BY created_at DESC LIMIT 5",
             (speaker_key,),
         )
         rows = cur.fetchall()
+        if not rows:
+            cur.execute(
+                "SELECT content, created_at FROM summaries "
+                "WHERE speaker_uuid = %s ORDER BY created_at DESC LIMIT 5",
+                (speaker_key,),
+            )
+            rows = cur.fetchall()
         cur.execute(
             "SELECT created_at FROM conversation_turns "
             "WHERE speaker_uuid = %s ORDER BY created_at DESC LIMIT 1",
@@ -1194,6 +1214,96 @@ def score_memories(message: str, candidates: list) -> list:
         return []
 
 
+def consolidate_memories(speaker_uuid: str):
+    """Merge related summaries for a speaker into consolidated_summaries. Originals are preserved."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, content, emotion_tag FROM summaries WHERE speaker_uuid = %s ORDER BY created_at ASC",
+        (speaker_uuid,),
+    )
+    all_summaries = cur.fetchall()
+    cur.execute(
+        "SELECT source_summary_ids FROM consolidated_summaries WHERE speaker_uuid = %s",
+        (speaker_uuid,),
+    )
+    already_consolidated_rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    consolidated_ids = set()
+    for row in already_consolidated_rows:
+        consolidated_ids.update(row["source_summary_ids"].split(","))
+
+    unconsolidated = [s for s in all_summaries if s["id"] not in consolidated_ids]
+    if len(unconsolidated) < 3:
+        logger.info("[consolidate] speaker=%s only %d unconsolidated summaries, skipping", speaker_uuid, len(unconsolidated))
+        return
+
+    numbered = "\n".join(
+        f"{i+1}. [{row['emotion_tag'] or 'routine'}] {row['content']}"
+        for i, row in enumerate(unconsolidated)
+    )
+
+    system_prompt = (
+        "You group related memory summaries together and merge each group into one coherent summary. "
+        "Summaries that are standalone (no clear relation to others) should be left out entirely. "
+        "Respond in JSON only, as a list of objects: "
+        '[{"merged_content": "...", "emotion_tag": "...", "source_indices": [1,2]}]. '
+        "emotion_tag must be one of: joyful, stressed, milestone, conflict, vulnerable, routine. "
+        "If nothing should be merged, respond with []. No explanation, no preamble."
+    )
+
+    try:
+        response = http_requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": numbered}
+                ],
+                "stream": False,
+                "options": {"num_predict": 800}
+            },
+            timeout=90
+        )
+        result = response.json()
+        content = result.get("message", {}).get("content", "").strip()
+        groups = json.loads(content)
+        if not isinstance(groups, list):
+            return
+    except Exception as e:
+        logger.warning("[consolidate] failed for speaker=%s: %s", speaker_uuid, e)
+        return
+
+    now = datetime.utcnow().isoformat() + "Z"
+    conn = get_db()
+    cur = conn.cursor()
+    for group in groups:
+        try:
+            indices = group.get("source_indices", [])
+            source_ids = [unconsolidated[i - 1]["id"] for i in indices if 1 <= i <= len(unconsolidated)]
+            if not source_ids:
+                continue
+            tag = group.get("emotion_tag", "routine")
+            if tag not in ("joyful", "stressed", "milestone", "conflict", "vulnerable", "routine"):
+                tag = "routine"
+            cur.execute(
+                """
+                INSERT INTO consolidated_summaries (id, speaker_uuid, content, source_summary_ids, emotion_tag, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (str(uuid.uuid4()), speaker_uuid, group.get("merged_content", ""), ",".join(source_ids), tag, now, now),
+            )
+        except Exception as e:
+            logger.warning("[consolidate] failed to write group for speaker=%s: %s", speaker_uuid, e)
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("[consolidate] speaker=%s wrote %d consolidated groups", speaker_uuid, len(groups))
+
+
 def check_memory_retrieval(message: str) -> dict:
     """Ask fox-memory whether this message warrants retrieving past memories."""
     system_prompt = (
@@ -1243,6 +1353,12 @@ def chat_proxy():
     system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + build_memory_block(speaker_key, speaker_name) + SEARCH_CURIOSITY_DIRECTIVE
     logger.info("[chat] system_prompt len=%d preview=%r", len(system_prompt), system_prompt[:120])
     user_message    = data.get("message", "")
+    # fox-memory: daily consolidation check (background, non-blocking)
+    last_run = _last_consolidation.get(speaker_key)
+    now_ts = time.time()
+    if not last_run or (now_ts - last_run) > 86400:
+        _last_consolidation[speaker_key] = now_ts
+        threading.Thread(target=consolidate_memories, args=(speaker_key,), daemon=True).start()
     # fox-memory: mid-conversation retrieval check
     retrieval = check_memory_retrieval(user_message)
     if retrieval.get("retrieve"):
@@ -1250,11 +1366,18 @@ def chat_proxy():
             conn = get_db()
             cur = conn.cursor()
             cur.execute(
-                "SELECT content, emotion_tag FROM summaries WHERE speaker_uuid = %s "
+                "SELECT content, emotion_tag FROM consolidated_summaries WHERE speaker_uuid = %s "
                 "ORDER BY created_at DESC LIMIT 10",
                 (speaker_key,),
             )
             candidate_rows = cur.fetchall()
+            if not candidate_rows:
+                cur.execute(
+                    "SELECT content, emotion_tag FROM summaries WHERE speaker_uuid = %s "
+                    "ORDER BY created_at DESC LIMIT 10",
+                    (speaker_key,),
+                )
+                candidate_rows = cur.fetchall()
             cur.close()
             conn.close()
             if candidate_rows:
