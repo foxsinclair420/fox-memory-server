@@ -1145,6 +1145,55 @@ def search_endpoint():
     results = _brave_search(data["query"].strip())
     return jsonify({"results": results})
 
+def score_memories(message: str, candidates: list) -> list:
+    """Ask fox-memory to score candidate summaries for relevance to the current message."""
+    if not candidates:
+        return []
+
+    numbered = "\n".join(
+        f"{i+1}. [{row['emotion_tag'] or 'routine'}] {row['content']}"
+        for i, row in enumerate(candidates)
+    )
+
+    system_prompt = (
+        "You are a memory relevance filter. Given a message and a numbered list of memory summaries, "
+        "return only the numbers of the summaries that are genuinely relevant to the message. "
+        "Respond with a JSON array of integers only. Example: [1, 3]. "
+        "If none are relevant, respond with []. No explanation, no preamble."
+    )
+
+    user_content = f"Message: {message}\n\nMemories:\n{numbered}"
+
+    try:
+        response = http_requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": "fox-memory:latest",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                "stream": False,
+                "options": {"temperature": 0.1}
+            },
+            timeout=15
+        )
+        result = response.json()
+        content = result.get("message", {}).get("content", "").strip()
+        indices = json.loads(content)
+        if not isinstance(indices, list):
+            return []
+        selected = [
+            candidates[i - 1]["content"]
+            for i in indices
+            if isinstance(i, int) and 1 <= i <= len(candidates)
+        ]
+        return selected
+    except Exception as e:
+        print(f"[fox-memory] scoring failed: {e}")
+        return []
+
+
 def check_memory_retrieval(message: str) -> dict:
     """Ask fox-memory whether this message warrants retrieving past memories."""
     system_prompt = (
@@ -1196,23 +1245,24 @@ def chat_proxy():
     user_message    = data.get("message", "")
     # fox-memory: mid-conversation retrieval check
     retrieval = check_memory_retrieval(user_message)
-    if retrieval.get("retrieve") and retrieval.get("query"):
-        query = retrieval["query"]
+    if retrieval.get("retrieve"):
         try:
             conn = get_db()
             cur = conn.cursor()
             cur.execute(
-                "SELECT content FROM summaries WHERE speaker_uuid = %s AND content ILIKE %s "
-                "ORDER BY created_at DESC LIMIT 3",
-                (speaker_key, f"%{query}%"),
+                "SELECT content, emotion_tag FROM summaries WHERE speaker_uuid = %s "
+                "ORDER BY created_at DESC LIMIT 10",
+                (speaker_key,),
             )
-            retrieved_rows = cur.fetchall()
+            candidate_rows = cur.fetchall()
             cur.close()
             conn.close()
-            if retrieved_rows:
-                retrieved = "\n".join(r["content"] for r in retrieved_rows)
-                system_prompt += f"\n\n[Retrieved memory — relevant to this message]\n{retrieved}"
-                logger.info("[fox-memory] retrieval injected for query=%r", query)
+            if candidate_rows:
+                scored = score_memories(user_message, candidate_rows)
+                if scored:
+                    retrieved = "\n".join(scored)
+                    system_prompt += f"\n\n[Retrieved memory — relevant to this message]\n{retrieved}"
+                    logger.info("[fox-memory] retrieval injected %d memories", len(scored))
         except Exception as e:
             logger.warning("[fox-memory] retrieval query failed: %s", e)
     max_tokens      = data.get("max_tokens", 200)
