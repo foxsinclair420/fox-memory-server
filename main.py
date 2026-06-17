@@ -1438,7 +1438,10 @@ def chat_proxy():
             logger.info("[vision] %.2fs — %r", time.time() - t0, desc[:200])
         except Exception as vis_err:
             logger.error("[vision] call failed: %s", vis_err)
-        messages.insert(-1, {"role": "user", "content": vision_description})
+        messages.insert(-1, {
+            "role": "system",
+            "content": f"The user has shared an image. Here is a factual description of what it actually contains: {vision_description}\n\nBase your response on this real description. Do not invent or assume details that aren't mentioned here.",
+        })
 
     # User-triggered search
     if SEARCH_INTENT_RE.search(user_message):
