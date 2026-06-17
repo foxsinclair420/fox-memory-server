@@ -226,7 +226,11 @@ def _do_summarize(job):
     summarizer_system = (
         "You produce concise conversation summaries. "
         "Third person, past tense. No personality commentary. "
-        + cfg["instruction"]
+        + cfg["instruction"] +
+        "\n\nAfter the summary, on a new line, output exactly one tag in this format: "
+        "TAG: <tag>\n"
+        "Choose the single best-fitting tag from this list based on the emotional tone of the conversation: "
+        "joyful, stressed, milestone, conflict, vulnerable, routine."
     )
     summarizer_user = f"Summarize this conversation:\n\n{transcript}"
 
@@ -247,7 +251,16 @@ def _do_summarize(job):
     )
     logger.info("[summarize] Ollama responded status=%d conversation_id=%s", resp.status_code, conversation_id)
     resp.raise_for_status()
-    summary = clean_reply(resp.json()["message"]["content"].strip())
+    raw_content = resp.json()["message"]["content"].strip()
+    emotion_tag = "routine"
+    summary_text = raw_content
+    match = re.search(r"TAG:\s*(\w+)", raw_content, re.IGNORECASE)
+    if match:
+        tag_candidate = match.group(1).lower()
+        if tag_candidate in ("joyful", "stressed", "milestone", "conflict", "vulnerable", "routine"):
+            emotion_tag = tag_candidate
+        summary_text = raw_content[:match.start()].strip()
+    summary = clean_reply(summary_text)
     if not summary:
         logger.warning("[summarize] empty summary for conversation_id=%s", conversation_id)
         return
@@ -259,12 +272,12 @@ def _do_summarize(job):
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO summaries (id, conversation_id, speaker_uuid, length, prompt_version, content, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO summaries (id, conversation_id, speaker_uuid, length, prompt_version, content, emotion_tag, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (conversation_id, speaker_uuid, length, prompt_version)
-        DO UPDATE SET content = EXCLUDED.content, created_at = EXCLUDED.created_at
+        DO UPDATE SET content = EXCLUDED.content, emotion_tag = EXCLUDED.emotion_tag, created_at = EXCLUDED.created_at
         """,
-        (summary_id, conversation_id, speaker_uuid, length, CURRENT_PROMPT_VERSION, summary, now),
+        (summary_id, conversation_id, speaker_uuid, length, CURRENT_PROMPT_VERSION, summary, emotion_tag, now),
     )
     conn.commit()
     cur.close()
@@ -400,6 +413,7 @@ def init_db():
             UNIQUE(conversation_id, speaker_uuid, length, prompt_version)
         )
     """)
+    cur.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS emotion_tag TEXT")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS directives (
             id          TEXT PRIMARY KEY,
