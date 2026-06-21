@@ -1120,6 +1120,16 @@ SEARCH_CURIOSITY_DIRECTIVE = (
     "Use this naturally and sparingly. Don't search every message. Search when you'd want to know more."
 )
 
+DEVLOG_DIRECTIVE = (
+    "\n\nWhen Jade tells you about a code change, new feature, fix, or anything that shipped — "
+    "and it feels worth logging — you may write a devlog entry by wrapping it in tags:\n\n"
+    "<devlog>your entry here</devlog>\n\n"
+    "The system will intercept the tags, post the entry to the Sinclair Studios dev log channel, "
+    "and strip them from your reply so they never show in chat. "
+    "Write it in your own voice as Fox — specific, grounded in what actually changed, no hype. "
+    "Only do this when something real shipped. Don't force it."
+)
+
 def _brave_search(query: str, count: int = 5) -> str:
     if not BRAVE_SEARCH_API_KEY:
         logger.warning("[search] BRAVE_SEARCH_API_KEY not set")
@@ -1350,7 +1360,10 @@ def chat_proxy():
     speaker_key     = data.get("speaker_key", "unknown")
     directives_block = build_directives_block()
     speaker_name    = data.get("speaker_name", speaker_key)
-    system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + build_memory_block(speaker_key, speaker_name) + SEARCH_CURIOSITY_DIRECTIVE
+    is_owner        = speaker_key == OWNER_UUID
+    owner_uuid      = data.get("owner_uuid", "")
+    owner_directive = DEVLOG_DIRECTIVE if is_owner else ""
+    system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + build_memory_block(speaker_key, speaker_name) + SEARCH_CURIOSITY_DIRECTIVE + owner_directive
     logger.info("[chat] system_prompt len=%d preview=%r", len(system_prompt), system_prompt[:120])
     user_message    = data.get("message", "")
     # fox-memory: daily consolidation check (background, non-blocking)
@@ -1389,8 +1402,6 @@ def chat_proxy():
         except Exception as e:
             logger.warning("[fox-memory] retrieval query failed: %s", e)
     max_tokens      = data.get("max_tokens", 200)
-    is_owner        = data.get("is_owner", False)
-    owner_uuid      = data.get("owner_uuid", "")
     conversation_id = conversation_ids.setdefault(speaker_key, str(uuid.uuid4()))
 
     raw_image = (data.get("image") or "").strip()
