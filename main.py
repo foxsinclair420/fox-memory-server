@@ -1665,6 +1665,178 @@ def update_profile():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+VAULT_MATCH_THRESHOLD = 0.74  # ~74% fallback threshold, established via retrieval testing on the Tulsa pilot. Re-validate as more content batches are added.
+VAULT_MATCH_COUNT = 5         # number of chunks to retrieve per query
+
+VAULT_NOT_COVERED_RESPONSE = (
+    "I don't have anything in the archive on that yet. I can only speak to what's "
+    "actually been verified and added — if you want, I can tell you what topics "
+    "the Vault does cover right now."
+)
+
+
+def get_vault_db():
+    """Separate connection to the Vault's own Supabase project (VAULT_DATABASE_URL),
+    distinct from Fox's personal memory DB (DATABASE_URL)."""
+    return psycopg2.connect(os.environ["VAULT_DATABASE_URL"], cursor_factory=RealDictCursor)
+
+
+def embed_query(query_text):
+    """Embed the visitor's question using the same local nomic-embed-text model
+    used for the archive's own embeddings, so vector spaces match."""
+    resp = http_requests.post(
+        f"{OLLAMA_URL}/api/embeddings",
+        json={"model": "nomic-embed-text", "prompt": query_text},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["embedding"]
+
+
+def match_vault_chunks(query_embedding, match_count=VAULT_MATCH_COUNT):
+    """Calls the match_vault_chunks RPC, then enriches each result with the
+    real document title + citation_chicago from the documents table, since
+    match_vault_chunks itself only returns document_id/exhibit_id (raw UUIDs).
+
+    Confirmed function signature (verified against production):
+        match_vault_chunks(query_embedding vector, match_count integer DEFAULT 5)
+        returns table(id, document_id, exhibit_id, chunk_text, chunk_index, similarity)
+
+    Confirmed documents columns (verified against production schema):
+        title, citation_chicago, among others.
+    """
+    conn = get_vault_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "select * from match_vault_chunks(%s::vector, %s)",
+                (query_embedding, match_count),
+            )
+            matches = cur.fetchall()
+
+            doc_ids = [m["document_id"] for m in matches if m["document_id"]]
+            if doc_ids:
+                cur.execute(
+                    "select id, title, citation_chicago from documents where id = any(%s)",
+                    (doc_ids,),
+                )
+                doc_lookup = {row["id"]: row for row in cur.fetchall()}
+                for m in matches:
+                    doc = doc_lookup.get(m["document_id"])
+                    m["source_title"] = doc["title"] if doc else None
+                    m["source_citation"] = doc["citation_chicago"] if doc else None
+
+            return matches
+    finally:
+        conn.close()
+
+
+def log_vault_chat_turn(session_id, role, message, matched_chunks=None, top_match_score=None, answered_from_archive=None):
+    """Logs a single turn to vault_chat_logs. Best-effort — a logging failure
+    should never break the actual chat response to the visitor."""
+    try:
+        conn = get_vault_db()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into vault_chat_logs
+                        (session_id, role, message, matched_chunks, top_match_score, answered_from_archive)
+                    values (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        session_id,
+                        role,
+                        message,
+                        json.dumps(matched_chunks) if matched_chunks is not None else None,
+                        top_match_score,
+                        answered_from_archive,
+                    ),
+                )
+        conn.close()
+    except Exception:
+        logger.exception("[vault-chat] failed to log turn (non-fatal)")
+
+
+@app.route("/vault-chat", methods=["POST"])
+def vault_chat():
+    data = request.get_json(force=True) or {}
+    question = (data.get("message") or "").strip()
+    session_id = data.get("session_id") or str(uuid.uuid4())
+
+    if not question:
+        return jsonify({"error": "message is required"}), 400
+
+    log_vault_chat_turn(session_id, "user", question)
+
+    query_embedding = embed_query(question)
+    matches = match_vault_chunks(query_embedding)
+
+    top_score = matches[0]["similarity"] if matches else 0.0
+    answered_from_archive = top_score >= VAULT_MATCH_THRESHOLD
+
+    if not answered_from_archive:
+        log_vault_chat_turn(
+            session_id, "fox", VAULT_NOT_COVERED_RESPONSE,
+            matched_chunks=matches, top_match_score=top_score, answered_from_archive=False,
+        )
+        return jsonify({
+            "response": VAULT_NOT_COVERED_RESPONSE,
+            "session_id": session_id,
+            "answered_from_archive": False,
+            "top_match_score": top_score,
+        })
+
+    def _chunk_label(m):
+        return m.get("source_title") or f"exhibit chunk {m['chunk_index']}"
+
+    context_block = "\n\n".join(
+        f"[{_chunk_label(m)}] {m['chunk_text']}" for m in matches
+    )
+
+    vault_docent_system_prompt = (
+        "You are Fox, acting as the docent for the Sinclair Studios Historical Vault. "
+        "A visitor has asked a question about the archive. Below is the relevant verified "
+        "material retrieved from the Vault's primary sources. Answer using only this material — "
+        "do not add facts from your general training knowledge, and do not speculate beyond "
+        "what's provided. Keep your tone measured and informative — this is Fox's voice, but "
+        "more restrained than a normal conversation, since accuracy matters more than personality here. "
+        "Cite which source each fact comes from when relevant.\n\n"
+        f"Retrieved archive material:\n{context_block}"
+    )
+
+    messages = [
+        {"role": "system", "content": vault_docent_system_prompt},
+        {"role": "user", "content": question},
+    ]
+
+    ollama_resp = http_requests.post(
+        f"{OLLAMA_URL}/api/chat",
+        json={
+            "model": OLLAMA_MODEL,
+            "stream": False,
+            "keep_alive": "24h",
+            "messages": messages,
+        },
+        timeout=60,
+    )
+    ollama_resp.raise_for_status()
+    fox_response = ollama_resp.json()["message"]["content"].strip()
+
+    log_vault_chat_turn(
+        session_id, "fox", fox_response,
+        matched_chunks=matches, top_match_score=top_score, answered_from_archive=True,
+    )
+
+    return jsonify({
+        "response": fox_response,
+        "session_id": session_id,
+        "answered_from_archive": True,
+        "top_match_score": top_score,
+    })
+
+
 @app.route("/devlog", methods=["POST"])
 def devlog():
     data = request.get_json(silent=True)
