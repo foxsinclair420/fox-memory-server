@@ -1718,7 +1718,7 @@ def match_vault_chunks(query_embedding, match_count=VAULT_MATCH_COUNT):
             doc_ids = [m["document_id"] for m in matches if m["document_id"]]
             if doc_ids:
                 cur.execute(
-                    "select id, title, citation_chicago from documents where id = any(%s)",
+                    "select id, title, citation_chicago from documents where id = any(%s::uuid[])",
                     (doc_ids,),
                 )
                 doc_lookup = {row["id"]: row for row in cur.fetchall()}
