@@ -1694,7 +1694,8 @@ def devlog():
         "FoxApp: the standalone web application — browser UI, chat interface, directives dashboard, memory tools, server endpoints. "
         "Ground the entry in the platform the commit actually touches based on the files changed and commit message. "
         "Server-side Python or workflow files belong to FoxApp/the backend. "
-        "Do not default to Second Life unless the change is clearly in-world."
+        "Do not default to Second Life unless the change is clearly in-world. "
+        "If you are not sure which platform a change belongs to, say so rather than guessing."
     )
     user_message = (
         f"Repo: {repo}\n"
