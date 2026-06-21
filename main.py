@@ -1361,6 +1361,7 @@ def chat_proxy():
     directives_block = build_directives_block()
     speaker_name    = data.get("speaker_name", speaker_key)
     is_owner        = speaker_key == OWNER_UUID
+    logger.info("[chat] speaker_key=%r is_owner=%s", speaker_key, is_owner)
     owner_uuid      = data.get("owner_uuid", "")
     owner_directive = DEVLOG_DIRECTIVE if is_owner else ""
     system_prompt = system_prompt + PRIVACY_BLOCK + directives_block + build_memory_block(speaker_key, speaker_name) + SEARCH_CURIOSITY_DIRECTIVE + owner_directive
@@ -1520,6 +1521,9 @@ def chat_proxy():
                     http_requests.post(DISCORD_WEBHOOK_URL, json={"content": devlog_content}, timeout=10)
                 except Exception as devlog_err:
                     logger.error("[devlog] post failed: %s", devlog_err)
+            else:
+                has_open_tag = "<devlog>" in reply.lower()
+                logger.warning("[devlog] is_owner=True but no complete tag found; has_open_tag=%s reply_tail=%r", has_open_tag, reply[-200:])
         conversation_history[speaker_key].append({"role": "assistant", "content": reply})
 
         # Enqueue summarization after every SUMMARIZE_EVERY turns
