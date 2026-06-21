@@ -1837,6 +1837,69 @@ def vault_chat():
     })
 
 
+@app.route("/vault-stats", methods=["GET"])
+def vault_stats():
+    """Simple read-only counts for the owner dashboard's stats section.
+    Uses the same get_vault_db() connection as /vault-chat."""
+    conn = get_vault_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("select count(*) as count from documents")
+            document_count = cur.fetchone()["count"]
+
+            cur.execute("select count(*) as count from documents where published = true")
+            published_document_count = cur.fetchone()["count"]
+
+            cur.execute("select count(*) as count from exhibits")
+            exhibit_count = cur.fetchone()["count"]
+
+            cur.execute("select count(*) as count from exhibits where published = true")
+            published_exhibit_count = cur.fetchone()["count"]
+
+            cur.execute("select count(*) as count from topics")
+            topic_count = cur.fetchone()["count"]
+
+            cur.execute("select count(*) as count from vault_embeddings")
+            embedding_count = cur.fetchone()["count"]
+
+            cur.execute("select count(*) as count from documents where file_storage_url is not null")
+            documents_with_photo_count = cur.fetchone()["count"]
+
+            cur.execute("select count(*) as count from vault_chat_logs where role = 'user'")
+            total_questions_asked = cur.fetchone()["count"]
+
+            cur.execute("select count(*) as count from vault_chat_logs where role = 'fox' and answered_from_archive = true")
+            answered_from_archive_count = cur.fetchone()["count"]
+
+            cur.execute("select count(*) as count from vault_chat_logs where role = 'fox' and answered_from_archive = false")
+            not_covered_count = cur.fetchone()["count"]
+
+        return jsonify({
+            "documents": {
+                "total": document_count,
+                "published": published_document_count,
+                "with_photo": documents_with_photo_count,
+            },
+            "exhibits": {
+                "total": exhibit_count,
+                "published": published_exhibit_count,
+            },
+            "topics": {
+                "total": topic_count,
+            },
+            "embeddings": {
+                "total": embedding_count,
+            },
+            "docent_activity": {
+                "total_questions": total_questions_asked,
+                "answered_from_archive": answered_from_archive_count,
+                "not_covered": not_covered_count,
+            },
+        })
+    finally:
+        conn.close()
+
+
 @app.route("/devlog", methods=["POST"])
 def devlog():
     data = request.get_json(silent=True)
