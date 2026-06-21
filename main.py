@@ -1840,15 +1840,17 @@ def vault_chat():
 @app.route("/vault-stats", methods=["GET"])
 def vault_stats():
     """Simple read-only counts for the owner dashboard's stats section.
-    Uses the same get_vault_db() connection as /vault-chat."""
+    Uses the same get_vault_db() connection as /vault-chat.
+
+    NOTE: documents has no `published` column (only exhibits does) —
+    confirmed against the real schema after a 500 error in production.
+    Documents are simply counted as-is; published/curated status only
+    applies at the exhibit level."""
     conn = get_vault_db()
     try:
         with conn.cursor() as cur:
             cur.execute("select count(*) as count from documents")
             document_count = cur.fetchone()["count"]
-
-            cur.execute("select count(*) as count from documents where published = true")
-            published_document_count = cur.fetchone()["count"]
 
             cur.execute("select count(*) as count from exhibits")
             exhibit_count = cur.fetchone()["count"]
@@ -1877,7 +1879,6 @@ def vault_stats():
         return jsonify({
             "documents": {
                 "total": document_count,
-                "published": published_document_count,
                 "with_photo": documents_with_photo_count,
             },
             "exhibits": {
