@@ -1687,7 +1687,7 @@ def embed_query(query_text):
     used for the archive's own embeddings, so vector spaces match."""
     resp = http_requests.post(
         f"{OLLAMA_URL}/api/embeddings",
-        json={"model": "nomic-embed-text", "prompt": query_text},
+        json={"model": "nomic-embed-text", "prompt": f"search_query: {query_text}"},
         timeout=30,
     )
     resp.raise_for_status()
