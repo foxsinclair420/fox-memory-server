@@ -1412,6 +1412,8 @@ def chat_proxy():
         except Exception as e:
             logger.warning("[fox-memory] retrieval query failed: %s", e)
     max_tokens      = data.get("max_tokens", 200)
+    if is_owner:
+        max_tokens = max(max_tokens, 600)
     conversation_id = conversation_ids.setdefault(speaker_key, str(uuid.uuid4()))
 
     raw_image = (data.get("image") or "").strip()
