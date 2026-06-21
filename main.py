@@ -1911,6 +1911,7 @@ def devlog():
     files_changed  = data.get("files_changed", [])
     author         = data.get("author", "")
     timestamp      = data.get("timestamp", "")
+    diff_content   = data.get("diff", "")
     if not OLLAMA_URL:
         return jsonify({"error": "OLLAMA_URL is not configured"}), 503
     if not DISCORD_WEBHOOK_URL:
@@ -1930,7 +1931,13 @@ def devlog():
         "Ground the entry in the platform the commit actually touches based on the files changed and commit message. "
         "Server-side Python or workflow files belong to FoxApp/the backend. "
         "Do not default to Second Life unless the change is clearly in-world. "
-        "If you are not sure which platform a change belongs to, say so rather than guessing."
+        "If you are not sure which platform a change belongs to, say so rather than guessing.\n\n"
+        "Accuracy rule — this is the most important constraint: describe only what is explicitly "
+        "visible in the diff and commit message. Do not infer, assume, or invent implementation "
+        "details that are not present in the provided diff — especially security mechanisms, "
+        "authentication, validation, or data flows. If the diff was not provided or is truncated "
+        "and you cannot see enough to be specific, describe what the commit message says and stay "
+        "general rather than filling gaps with plausible-sounding details."
     )
     user_message = (
         f"Repo: {repo}\n"
@@ -1938,7 +1945,8 @@ def devlog():
         f"Message: {commit_message}\n"
         f"Author: {author}\n"
         f"Timestamp: {timestamp}\n"
-        f"Files changed:\n" + "\n".join(f"  - {f}" for f in files_changed)
+        f"Files changed:\n" + "\n".join(f"  - {f}" for f in files_changed) +
+        (f"\n\nDiff (may be truncated at 3000 chars):\n{diff_content}" if diff_content else "")
     )
     try:
         ollama_resp = http_requests.post(
