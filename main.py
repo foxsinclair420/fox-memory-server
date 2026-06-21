@@ -1749,7 +1749,7 @@ def log_vault_chat_turn(session_id, role, message, matched_chunks=None, top_matc
                         session_id,
                         role,
                         message,
-                        json.dumps(matched_chunks) if matched_chunks is not None else None,
+                        json.dumps([dict(m) for m in matched_chunks]) if matched_chunks is not None else None,
                         top_match_score,
                         answered_from_archive,
                     ),
