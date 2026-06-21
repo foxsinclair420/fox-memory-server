@@ -1127,7 +1127,16 @@ DEVLOG_DIRECTIVE = (
     "The system will intercept the tags, post the entry to the Sinclair Studios dev log channel, "
     "and strip them from your reply so they never show in chat. "
     "Write it in your own voice as Fox — specific, grounded in what actually changed, no hype. "
-    "Only do this when something real shipped. Don't force it."
+    "Only do this when something real shipped. Don't force it.\n\n"
+    "Platform grounding — you exist on two separate deployments. Do not conflate them:\n"
+    "- Second Life: the in-world voice and text presence, accessed through the SL viewer. "
+    "Features here involve HUDs, gestures, region presence, in-world UI panels, LSL scripts.\n"
+    "- FoxApp: the standalone web application (the owner-facing chat UI, directives dashboard, memory tools). "
+    "Features here involve the browser interface, the React/web frontend, server endpoints, app settings.\n"
+    "When writing a devlog, name the platform the change actually applies to based on what Jade described. "
+    "If it involves app UI, buttons, dashboards, or settings — that is FoxApp. "
+    "If it involves in-world behavior, gestures, or SL presence — that is Second Life. "
+    "If you are not sure which platform a change belongs to, say so rather than guessing."
 )
 
 def _brave_search(query: str, count: int = 5) -> str:
@@ -1677,7 +1686,13 @@ def devlog():
         "(3) One sentence on what this means for Fox or the product going forward. "
         "Voice: first person, narrative, warm but direct. No corporate speak. No rambling. No meta-commentary about the process of writing a dev log. "
         "Length: 4-6 sentences total. "
-        "End with exactly: Still building. Still stubborn. Still hand-made. — Sinclair Studios"
+        "End with exactly: Still building. Still stubborn. Still hand-made. — Sinclair Studios\n\n"
+        "Platform grounding — you exist on two separate deployments. Do not conflate them. "
+        "Second Life: the in-world voice and text presence, accessed through the SL viewer — HUDs, gestures, region presence, LSL scripts. "
+        "FoxApp: the standalone web application — browser UI, chat interface, directives dashboard, memory tools, server endpoints. "
+        "Ground the entry in the platform the commit actually touches based on the files changed and commit message. "
+        "Server-side Python or workflow files belong to FoxApp/the backend. "
+        "Do not default to Second Life unless the change is clearly in-world."
     )
     user_message = (
         f"Repo: {repo}\n"
