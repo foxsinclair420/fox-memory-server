@@ -1919,6 +1919,66 @@ def vault_stats():
         conn.close()
 
 
+@app.route("/vault-banner", methods=["GET"])
+def vault_banner_get():
+    conn = get_vault_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select message, expires_at from vault_banner
+                where is_active = true
+                  and (expires_at is null or expires_at >= current_date)
+                order by updated_at desc
+                limit 1
+                """
+            )
+            row = cur.fetchone()
+        if row:
+            return jsonify({
+                "message": row["message"],
+                "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+            })
+        return jsonify({"message": None})
+    finally:
+        conn.close()
+
+
+@app.route("/vault-banner", methods=["POST"])
+def vault_banner_post():
+    owner_key = os.environ.get("VAULT_OWNER_KEY", "")
+    if not owner_key or request.headers.get("X-Vault-Owner-Key") != owner_key:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    message    = data.get("message", "")
+    expires_at = data.get("expires_at")  # date string or null
+    is_active  = data.get("is_active", True)
+
+    conn = get_vault_db()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("delete from vault_banner")
+                cur.execute(
+                    """
+                    insert into vault_banner (message, expires_at, is_active, updated_at)
+                    values (%s, %s, %s, now())
+                    returning id, message, expires_at, is_active, updated_at
+                    """,
+                    (message, expires_at, is_active),
+                )
+                row = dict(cur.fetchone())
+        row["expires_at"] = row["expires_at"].isoformat() if row["expires_at"] else None
+        row["updated_at"] = row["updated_at"].isoformat() if row["updated_at"] else None
+        return jsonify(row)
+    finally:
+        conn.close()
+
+
 @app.route("/devlog", methods=["POST"])
 def devlog():
     data = request.get_json(silent=True)
