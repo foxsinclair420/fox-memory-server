@@ -1860,6 +1860,10 @@ def vault_stats():
     confirmed against the real schema after a 500 error in production.
     Documents are simply counted as-is; published/curated status only
     applies at the exhibit level."""
+    owner_key = os.environ.get("VAULT_OWNER_KEY", "")
+    if not owner_key or request.headers.get("X-Vault-Owner-Key") != owner_key:
+        return jsonify({"error": "Unauthorized"}), 401
+
     conn = get_vault_db()
     try:
         with conn.cursor() as cur:
