@@ -36,6 +36,7 @@ OWNER_UUID = "a6fc9585-5882-4ed0-a9b7-343fd24f789a"
 conversation_history = {}
 MAX_HISTORY = 6
 conversation_ids = {}  # speaker_key -> current conversation_id (session-scoped, resets on restart)
+_vault_chat_request_log = {}  # ip -> list of request timestamps (float), for rate limiting
 _last_consolidation = {}
 
 CURRENT_PROMPT_VERSION = 1
@@ -1761,6 +1762,19 @@ def log_vault_chat_turn(session_id, role, message, matched_chunks=None, top_matc
 
 @app.route("/vault-chat", methods=["POST"])
 def vault_chat():
+    owner_key = os.environ.get("VAULT_OWNER_KEY", "")
+    is_vault_owner = bool(owner_key and request.headers.get("X-Vault-Owner-Key") == owner_key)
+    if not is_vault_owner:
+        ip = request.remote_addr
+        now = time.time()
+        window = _vault_chat_request_log.get(ip, [])
+        window = [t for t in window if now - t < 60]
+        if len(window) >= 10:
+            _vault_chat_request_log[ip] = window
+            return jsonify({"error": "Too many requests, please wait a moment."}), 429
+        window.append(now)
+        _vault_chat_request_log[ip] = window
+
     data = request.get_json(force=True) or {}
     question = (data.get("message") or "").strip()
     session_id = data.get("session_id") or str(uuid.uuid4())
