@@ -1689,7 +1689,7 @@ def embed_query(query_text):
     resp = http_requests.post(
         f"{OLLAMA_URL}/api/embeddings",
         json={"model": "nomic-embed-text", "prompt": query_text},
-        timeout=30,
+        timeout=60,
     )
     resp.raise_for_status()
     return resp.json()["embedding"]
