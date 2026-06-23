@@ -1987,7 +1987,7 @@ def vault_flash_get():
             cur.execute(
                 """
                 select message, created_at from vault_flash
-                where now() - created_at <= interval '20 seconds'
+                where now() - created_at <= interval '30 seconds'
                 order by created_at desc
                 limit 1
                 """
