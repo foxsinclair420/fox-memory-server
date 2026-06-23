@@ -1979,6 +1979,58 @@ def vault_banner_post():
         conn.close()
 
 
+@app.route("/vault-flash", methods=["GET"])
+def vault_flash_get():
+    conn = get_vault_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select message, created_at from vault_flash
+                where now() - created_at <= interval '20 seconds'
+                order by created_at desc
+                limit 1
+                """
+            )
+            row = cur.fetchone()
+        if row:
+            return jsonify({"message": row["message"]})
+        return jsonify({"message": None})
+    finally:
+        conn.close()
+
+
+@app.route("/vault-flash", methods=["POST"])
+def vault_flash_post():
+    owner_key = os.environ.get("VAULT_OWNER_KEY", "")
+    if not owner_key or request.headers.get("X-Vault-Owner-Key") != owner_key:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    message = data.get("message", "")
+
+    conn = get_vault_db()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into vault_flash (message, created_at)
+                    values (%s, now())
+                    returning id, message, created_at
+                    """,
+                    (message,),
+                )
+                row = dict(cur.fetchone())
+        row["created_at"] = row["created_at"].isoformat() if row["created_at"] else None
+        return jsonify(row), 201
+    finally:
+        conn.close()
+
+
 @app.route("/devlog", methods=["POST"])
 def devlog():
     data = request.get_json(silent=True)
