@@ -2,6 +2,7 @@ import json
 import re
 import logging
 import os
+import secrets
 import queue
 import sys
 import threading
@@ -319,6 +320,10 @@ def _ensure_summarize_worker():
 
 # ─── TOKEN HELPERS ────────────────────────────────────────────────────────────
 
+def is_owner_token(token: str) -> bool:
+    return bool(validate_token(token) == OWNER_UUID and OWNER_UUID)
+
+
 def make_token(owner_uuid: str) -> str:
     ts = str(int(time.time()))
     payload = f"{owner_uuid}:{ts}"
@@ -470,12 +475,36 @@ def auth():
     return jsonify({"token": token, "owner_uuid": OWNER_UUID}), 200
 
 
+_terminal_tickets: dict = {}
+
+
 @app.route("/validate-owner-token", methods=["GET"])
 def validate_owner_token():
     token = request.headers.get("X-Session-Token", "")
-    token_uuid = validate_token(token)
-    if token_uuid == OWNER_UUID:
+    if is_owner_token(token):
         return jsonify({"valid": True}), 200
+    return jsonify({"valid": False}), 200
+
+
+@app.route("/terminal-ticket", methods=["POST"])
+def terminal_ticket():
+    token = request.headers.get("X-Session-Token", "")
+    if not is_owner_token(token):
+        return jsonify({"error": "Unauthorized"}), 401
+    ticket = secrets.token_urlsafe(32)
+    _terminal_tickets[ticket] = time.time() + 60
+    return jsonify({"ticket": ticket}), 200
+
+
+@app.route("/terminal-ticket/verify", methods=["GET"])
+def terminal_ticket_verify():
+    ticket = request.args.get("ticket", "")
+    expiry = _terminal_tickets.get(ticket)
+    if expiry and time.time() < expiry:
+        del _terminal_tickets[ticket]
+        return jsonify({"valid": True}), 200
+    if ticket in _terminal_tickets:
+        del _terminal_tickets[ticket]
     return jsonify({"valid": False}), 200
 
 
