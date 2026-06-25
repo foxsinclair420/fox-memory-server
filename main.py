@@ -470,6 +470,15 @@ def auth():
     return jsonify({"token": token, "owner_uuid": OWNER_UUID}), 200
 
 
+@app.route("/validate-owner-token", methods=["GET"])
+def validate_owner_token():
+    token = request.headers.get("X-Session-Token", "")
+    token_uuid = validate_token(token)
+    if token_uuid == OWNER_UUID:
+        return jsonify({"valid": True}), 200
+    return jsonify({"valid": False}), 200
+
+
 HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
