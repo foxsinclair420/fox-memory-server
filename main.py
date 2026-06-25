@@ -31,7 +31,7 @@ BRAVE_SEARCH_API_KEY = os.environ.get("BRAVE_SEARCH_API_KEY", "")
 APP_PIN = os.environ.get("APP_PIN", "")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
-OWNER_UUID = "a6fc9585-5882-4ed0-a9b7-343fd24f789a"
+OWNER_UUID = os.environ.get("OWNER_UUID", "")
 
 conversation_history = {}
 MAX_HISTORY = 6
@@ -462,13 +462,12 @@ def auth():
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
     pin = data.get("pin", "").strip()
-    owner_uuid = data.get("owner_uuid", "").strip()
-    if not APP_PIN or not TOKEN_SECRET:
+    if not APP_PIN or not TOKEN_SECRET or not OWNER_UUID:
         return jsonify({"error": "Server not configured"}), 503
-    if pin != APP_PIN or not owner_uuid:
+    if pin != APP_PIN:
         return jsonify({"error": "Invalid PIN"}), 401
-    token = make_token(owner_uuid)
-    return jsonify({"token": token, "owner_uuid": owner_uuid}), 200
+    token = make_token(OWNER_UUID)
+    return jsonify({"token": token, "owner_uuid": OWNER_UUID}), 200
 
 
 HTML = """<!DOCTYPE html>
@@ -1367,10 +1366,12 @@ def chat_proxy():
         return jsonify({"error": "Invalid JSON"}), 400
 
     system_prompt   = data.get("system", "")
-    speaker_key     = data.get("speaker_key", "unknown")
+    token = request.headers.get("X-Session-Token", "")
+    token_uuid = validate_token(token) if not is_sl_request() else None
+    speaker_key = token_uuid if token_uuid else data.get("speaker_key", "unknown")
     directives_block = build_directives_block()
     speaker_name    = data.get("speaker_name", speaker_key)
-    is_owner        = speaker_key == OWNER_UUID
+    is_owner        = token_uuid == OWNER_UUID
     logger.info("[chat] speaker_key=%r is_owner=%s", speaker_key, is_owner)
     owner_uuid      = data.get("owner_uuid", "")
     owner_directive = DEVLOG_DIRECTIVE if is_owner else ""
