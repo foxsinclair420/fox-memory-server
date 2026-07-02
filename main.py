@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
 
 import requests as http_requests
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, request, render_template_string, Response, stream_with_context
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -506,6 +506,39 @@ def terminal_ticket_verify():
     if ticket in _terminal_tickets:
         del _terminal_tickets[ticket]
     return jsonify({"valid": False}), 200
+
+
+@app.route("/code", methods=["POST"])
+def code_proxy():
+    token = request.headers.get("X-Session-Token", "")
+    if not is_owner_token(token):
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True)
+    if not data or not data.get("prompt"):
+        return jsonify({"error": "Missing prompt"}), 400
+    if not OLLAMA_URL:
+        return jsonify({"error": "OLLAMA_URL is not configured"}), 503
+    prompt = data["prompt"]
+
+    def generate():
+        try:
+            with http_requests.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": "qwen2.5-coder:7b", "prompt": prompt, "stream": True},
+                stream=True,
+                timeout=120,
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if line:
+                        try:
+                            yield json.loads(line).get("response", "")
+                        except json.JSONDecodeError:
+                            pass
+        except Exception as e:
+            logger.error("[code] ollama stream error: %s", e)
+
+    return Response(stream_with_context(generate()), mimetype="text/plain")
 
 
 HTML = """<!DOCTYPE html>
